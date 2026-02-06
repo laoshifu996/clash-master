@@ -15,12 +15,7 @@ services:
       - ./data:/app/data
     environment:
       - NODE_ENV=production
+      - WEB_PORT=3000
       - API_PORT=3001
-      - WS_PORT=3002
+      - COLLECTOR_WS_PORT=3002
       - DB_PATH=/app/data/stats.db
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3001/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s

@@ -10,6 +10,8 @@ const rootPkg = JSON.parse(
   readFileSync(join(__dirname, "../../package.json"), "utf-8"),
 );
 
+const API_URL = process.env.API_URL || "http://localhost:3001";
+
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   output: 'standalone',
@@ -20,7 +22,7 @@ const nextConfig: NextConfig = {
     return [
       {
         source: "/api/:path*",
-        destination: "http://localhost:3001/api/:path*",
+        destination: `${API_URL}/api/:path*`,
       },
     ];
   },

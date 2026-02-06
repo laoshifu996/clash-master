@@ -32,7 +32,17 @@ RUN pnpm --filter @clashmaster/web build
 # Production stage
 FROM node:22-alpine AS production
 
+# Install wget for health checks
+RUN apk add --no-cache wget
+
 WORKDIR /app
+
+# Default environment variables
+ENV NODE_ENV=production \
+    WEB_PORT=3000 \
+    API_PORT=3001 \
+    COLLECTOR_WS_PORT=3002 \
+    DB_PATH=/app/data/stats.db
 
 # Ensure data directory exists
 RUN mkdir -p /app/data
@@ -59,6 +69,10 @@ EXPOSE 3000 3001 3002
 
 # Data volume
 VOLUME ["/app/data"]
+
+# Health check - verify API is responding
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD wget -q --spider http://127.0.0.1:3001/health || exit 1
 
 # Start script
 COPY docker-start.sh ./
