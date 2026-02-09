@@ -21,8 +21,10 @@ import { cn } from "@/lib/utils";
 import { api, type ClashRulesResponse, type TimeRange } from "@/lib/api";
 import { CountryFlag } from "@/components/country-flag";
 import { Favicon } from "@/components/favicon";
+import { ProxyChainBadge } from "@/components/proxy-chain-badge";
+import { DomainExpandedDetails, IPExpandedDetails } from "@/components/stats-tables/expanded-details";
 import { UnifiedRuleChainFlow } from "@/components/rule-chain-flow";
-import type { RuleStats, DomainStats, IPStats } from "@clashmaster/shared";
+import type { RuleStats, DomainStats, IPStats, ProxyTrafficStats } from "@clashmaster/shared";
 
 interface InteractiveRuleStatsProps {
   data: RuleStats[];
@@ -44,22 +46,6 @@ const CHART_COLORS = [
 const PAGE_SIZE_OPTIONS = [10, 20, 50] as const;
 type PageSize = typeof PAGE_SIZE_OPTIONS[number];
 
-// Generate gradient based on IP - same as DomainsTable
-const getIPGradient = (ip: string) => {
-  const colors = [
-    "from-emerald-500 to-teal-400",
-    "from-blue-500 to-cyan-400",
-    "from-violet-500 to-purple-400",
-    "from-orange-500 to-amber-400",
-    "from-rose-500 to-pink-400",
-  ];
-  let hash = 0;
-  for (let i = 0; i < ip.length; i++) {
-    hash = ip.charCodeAt(i) + ((hash << 5) - hash);
-  }
-  return colors[Math.abs(hash) % colors.length];
-};
-
 // Domain sort keys
 type DomainSortKey = "domain" | "totalDownload" | "totalUpload" | "totalConnections";
 type SortOrder = "asc" | "desc";
@@ -78,14 +64,6 @@ const ICON_COLORS = [
   { bg: "bg-indigo-500", text: "text-white" },
   { bg: "bg-teal-500", text: "text-white" },
 ];
-
-const getDomainColor = (domain: string) => {
-  let hash = 0;
-  for (let i = 0; i < domain.length; i++) {
-    hash = domain.charCodeAt(i) + ((hash << 5) - hash);
-  }
-  return ICON_COLORS[Math.abs(hash) % ICON_COLORS.length];
-};
 
 const getIPColor = (ip: string) => {
   let hash = 0;
@@ -149,6 +127,14 @@ export function InteractiveRuleStats({
   // Expanded states
   const [expandedDomain, setExpandedDomain] = useState<string | null>(null);
   const [expandedIP, setExpandedIP] = useState<string | null>(null);
+  const [domainProxyStats, setDomainProxyStats] = useState<Record<string, ProxyTrafficStats[]>>({});
+  const [domainProxyStatsLoading, setDomainProxyStatsLoading] = useState<string | null>(null);
+  const [domainIPDetails, setDomainIPDetails] = useState<Record<string, IPStats[]>>({});
+  const [domainIPDetailsLoading, setDomainIPDetailsLoading] = useState<string | null>(null);
+  const [ipProxyStats, setIPProxyStats] = useState<Record<string, ProxyTrafficStats[]>>({});
+  const [ipProxyStatsLoading, setIPProxyStatsLoading] = useState<string | null>(null);
+  const [ipDomainDetails, setIPDomainDetails] = useState<Record<string, DomainStats[]>>({});
+  const [ipDomainDetailsLoading, setIPDomainDetailsLoading] = useState<string | null>(null);
   const requestIdRef = useRef(0);
   const prevSelectedRuleRef = useRef<string | null>(null);
   const prevBackendRef = useRef<number | undefined>(undefined);
@@ -260,12 +246,96 @@ export function InteractiveRuleStats({
 
   // Toggle expand handlers
   const toggleExpandDomain = (domain: string) => {
-    setExpandedDomain(expandedDomain === domain ? null : domain);
+    const newExpanded = expandedDomain === domain ? null : domain;
+    setExpandedDomain(newExpanded);
+    if (newExpanded) {
+      fetchExpandedDomainDetails(newExpanded);
+    }
   };
 
   const toggleExpandIP = (ip: string) => {
-    setExpandedIP(expandedIP === ip ? null : ip);
+    const newExpanded = expandedIP === ip ? null : ip;
+    setExpandedIP(newExpanded);
+    if (newExpanded) {
+      fetchExpandedIPDetails(newExpanded);
+    }
   };
+
+  const fetchExpandedDomainDetails = useCallback(async (
+    domain: string,
+    options?: { force?: boolean; background?: boolean },
+  ) => {
+    if (!selectedRule) return;
+    const force = options?.force ?? false;
+    const background = options?.background ?? false;
+    const hasProxyCached = !!domainProxyStats[domain];
+    const hasIPCached = !!domainIPDetails[domain];
+    if (!force && hasProxyCached && hasIPCached) return;
+
+    if (!background || !hasProxyCached) setDomainProxyStatsLoading(domain);
+    if (!background || !hasIPCached) setDomainIPDetailsLoading(domain);
+    try {
+      const [proxyStats, ipDetails] = await Promise.all([
+        api.getRuleDomainProxyStats(selectedRule, domain, activeBackendId, timeRange),
+        api.getRuleDomainIPDetails(selectedRule, domain, activeBackendId, timeRange),
+      ]);
+      setDomainProxyStats((prev) => ({ ...prev, [domain]: proxyStats }));
+      setDomainIPDetails((prev) => ({ ...prev, [domain]: ipDetails }));
+    } catch (err) {
+      console.error(`Failed to fetch rule-domain details for ${domain}:`, err);
+      setDomainProxyStats((prev) => ({ ...prev, [domain]: [] }));
+      setDomainIPDetails((prev) => ({ ...prev, [domain]: [] }));
+    } finally {
+      if (domainProxyStatsLoading === domain) setDomainProxyStatsLoading(null);
+      if (domainIPDetailsLoading === domain) setDomainIPDetailsLoading(null);
+    }
+  }, [
+    selectedRule,
+    domainProxyStats,
+    domainIPDetails,
+    activeBackendId,
+    timeRange,
+    domainProxyStatsLoading,
+    domainIPDetailsLoading,
+  ]);
+
+  const fetchExpandedIPDetails = useCallback(async (
+    ip: string,
+    options?: { force?: boolean; background?: boolean },
+  ) => {
+    if (!selectedRule) return;
+    const force = options?.force ?? false;
+    const background = options?.background ?? false;
+    const hasProxyCached = !!ipProxyStats[ip];
+    const hasDomainCached = !!ipDomainDetails[ip];
+    if (!force && hasProxyCached && hasDomainCached) return;
+
+    if (!background || !hasProxyCached) setIPProxyStatsLoading(ip);
+    if (!background || !hasDomainCached) setIPDomainDetailsLoading(ip);
+    try {
+      const [proxyStats, domainDetails] = await Promise.all([
+        api.getRuleIPProxyStats(selectedRule, ip, activeBackendId, timeRange),
+        api.getRuleIPDomainDetails(selectedRule, ip, activeBackendId, timeRange),
+      ]);
+      setIPProxyStats((prev) => ({ ...prev, [ip]: proxyStats }));
+      setIPDomainDetails((prev) => ({ ...prev, [ip]: domainDetails }));
+    } catch (err) {
+      console.error(`Failed to fetch rule-ip details for ${ip}:`, err);
+      setIPProxyStats((prev) => ({ ...prev, [ip]: [] }));
+      setIPDomainDetails((prev) => ({ ...prev, [ip]: [] }));
+    } finally {
+      if (ipProxyStatsLoading === ip) setIPProxyStatsLoading(null);
+      if (ipDomainDetailsLoading === ip) setIPDomainDetailsLoading(null);
+    }
+  }, [
+    selectedRule,
+    ipProxyStats,
+    ipDomainDetails,
+    activeBackendId,
+    timeRange,
+    ipProxyStatsLoading,
+    ipDomainDetailsLoading,
+  ]);
 
   // Sort icon component
   const DomainSortIcon = ({ column }: { column: DomainSortKey }) => {
@@ -356,6 +426,35 @@ export function InteractiveRuleStats({
       });
     }
   }, [selectedRule, activeBackendId, timeRange, loadRuleDetails, ruleDomains.length, ruleIPs.length, loading]);
+
+  useEffect(() => {
+    setExpandedDomain(null);
+    setExpandedIP(null);
+    setDomainProxyStats({});
+    setDomainIPDetails({});
+    setIPProxyStats({});
+    setIPDomainDetails({});
+    setDomainProxyStatsLoading(null);
+    setDomainIPDetailsLoading(null);
+    setIPProxyStatsLoading(null);
+    setIPDomainDetailsLoading(null);
+  }, [selectedRule, activeBackendId]);
+
+  useEffect(() => {
+    if (expandedDomain) {
+      fetchExpandedDomainDetails(expandedDomain, { force: true, background: true });
+    }
+    if (expandedIP) {
+      fetchExpandedIPDetails(expandedIP, { force: true, background: true });
+    }
+  }, [
+    timeRange?.start,
+    timeRange?.end,
+    expandedDomain,
+    expandedIP,
+    fetchExpandedDomainDetails,
+    fetchExpandedIPDetails,
+  ]);
 
   const handleRuleClick = useCallback((rule: string) => {
     if (selectedRule !== rule) {
@@ -853,11 +952,14 @@ export function InteractiveRuleStats({
                     {/* Desktop Table Header */}
                     <div className="hidden sm:grid grid-cols-12 gap-3 px-5 py-3 bg-secondary/30 text-xs font-medium text-muted-foreground uppercase tracking-wider">
                       <div 
-                        className="col-span-4 flex items-center cursor-pointer hover:text-foreground transition-colors"
+                        className="col-span-3 flex items-center cursor-pointer hover:text-foreground transition-colors"
                         onClick={() => handleDomainSort("domain")}
                       >
                         {domainsT("domain")}
                         <DomainSortIcon column="domain" />
+                      </div>
+                      <div className="col-span-2 flex items-center">
+                        {domainsT("proxy")}
                       </div>
                       <div 
                         className="col-span-2 flex items-center justify-end cursor-pointer hover:text-foreground transition-colors"
@@ -874,7 +976,7 @@ export function InteractiveRuleStats({
                         <DomainSortIcon column="totalUpload" />
                       </div>
                       <div 
-                        className="col-span-2 flex items-center justify-end cursor-pointer hover:text-foreground transition-colors"
+                        className="col-span-1 flex items-center justify-end cursor-pointer hover:text-foreground transition-colors"
                         onClick={() => handleDomainSort("totalConnections")}
                       >
                         {domainsT("conn")}
@@ -934,11 +1036,16 @@ export function InteractiveRuleStats({
                                 onClick={() => toggleExpandDomain(domain.domain)}
                               >
                                 {/* Domain with Favicon */}
-                                <div className="col-span-4 flex items-center gap-3 min-w-0">
+                                <div className="col-span-3 flex items-center gap-3 min-w-0">
                                   <Favicon domain={domain.domain} size="sm" className="shrink-0" />
                                   <span className="font-medium text-sm truncate" title={domain.domain}>
                                     {domain.domain}
                                   </span>
+                                </div>
+
+                                {/* Proxy */}
+                                <div className="col-span-2 flex items-center gap-1.5 min-w-0">
+                                  <ProxyChainBadge chains={domain.chains} />
                                 </div>
 
                                 {/* Download */}
@@ -952,7 +1059,7 @@ export function InteractiveRuleStats({
                                 </div>
 
                                 {/* Connections */}
-                                <div className="col-span-2 flex items-center justify-end">
+                                <div className="col-span-1 flex items-center justify-end">
                                   <span className="px-2 py-0.5 rounded-full bg-secondary text-xs font-medium">
                                     {formatNumber(domain.totalConnections)}
                                   </span>
@@ -1019,6 +1126,13 @@ export function InteractiveRuleStats({
                                   </Button>
                                 </div>
 
+                                {/* Proxy row */}
+                                {domain.chains && domain.chains.length > 0 && (
+                                  <div className="flex items-center gap-1.5 mb-2 pl-[30px]">
+                                    <ProxyChainBadge chains={domain.chains} truncateLabel={false} />
+                                  </div>
+                                )}
+
                                 {/* Bottom: Stats row */}
                                 <div className="flex items-center justify-between text-xs pl-[30px]">
                                   <span className="text-blue-500 tabular-nums">↓ {formatBytes(domain.totalDownload)}</span>
@@ -1029,35 +1143,20 @@ export function InteractiveRuleStats({
                                 </div>
                               </div>
 
-                              {/* Expanded Details: Associated IPs */}
+                              {/* Expanded Details: Proxy Traffic + Associated IPs */}
                               {isExpanded && (
-                                <div className="px-4 sm:px-5 pb-4 bg-secondary/5">
-                                  <div className="pt-3">
-                                    {/* Associated IPs */}
-                                    <div className="px-1">
-                                      <p className="text-xs font-medium text-muted-foreground mb-2.5 flex items-center gap-1.5">
-                                        <Globe className="h-3 w-3" />
-                                        {domainsT("associatedIPs")}
-                                      </p>
-                                      <div className="flex flex-wrap gap-2">
-                                        {domain.ips.map((ip) => {
-                                          const gradient = getIPGradient(ip);
-                                          return (
-                                            <div
-                                              key={ip}
-                                              className="flex items-center gap-2 px-2.5 py-1.5 sm:px-3 sm:py-2 rounded-lg bg-card border border-border/50 hover:border-primary/30 hover:shadow-sm transition-all"
-                                            >
-                                              <div className={`w-5 h-5 sm:w-6 sm:h-6 rounded-md bg-gradient-to-br ${gradient} flex items-center justify-center shrink-0`}>
-                                                <Server className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-white" />
-                                              </div>
-                                              <code className="text-xs font-mono break-all">{ip}</code>
-                                            </div>
-                                          );
-                                        })}
-                                      </div>
-                                    </div>
-                                  </div>
-                                </div>
+                                <DomainExpandedDetails
+                                  domain={domain}
+                                  proxyStats={domainProxyStats[domain.domain]}
+                                  proxyStatsLoading={domainProxyStatsLoading === domain.domain}
+                                  ipDetails={domainIPDetails[domain.domain]}
+                                  ipDetailsLoading={domainIPDetailsLoading === domain.domain}
+                                  labels={{
+                                    proxyTraffic: domainsT("proxyTraffic"),
+                                    associatedIPs: domainsT("associatedIPs"),
+                                    conn: domainsT("conn"),
+                                  }}
+                                />
                               )}
                             </div>
                           );
@@ -1201,6 +1300,9 @@ export function InteractiveRuleStats({
                         <IPSortIcon column="ip" />
                       </div>
                       <div className="col-span-2 flex items-center">
+                        {ipsT("proxy")}
+                      </div>
+                      <div className="col-span-2 flex items-center">
                         {ipsT("location")}
                       </div>
                       <div 
@@ -1211,7 +1313,7 @@ export function InteractiveRuleStats({
                         <IPSortIcon column="totalDownload" />
                       </div>
                       <div 
-                        className="col-span-2 flex items-center justify-end cursor-pointer hover:text-foreground transition-colors"
+                        className="col-span-1 flex items-center justify-end cursor-pointer hover:text-foreground transition-colors"
                         onClick={() => handleIPSort("totalUpload")}
                       >
                         {ipsT("upload")}
@@ -1224,7 +1326,7 @@ export function InteractiveRuleStats({
                         {ipsT("conn")}
                         <IPSortIcon column="totalConnections" />
                       </div>
-                      <div className="col-span-2 flex items-center justify-end">
+                      <div className="col-span-1 flex items-center justify-end">
                         {ipsT("domainCount")}
                       </div>
                     </div>
@@ -1286,12 +1388,17 @@ export function InteractiveRuleStats({
                                   <code className="text-sm font-mono truncate">{ip.ip}</code>
                                 </div>
 
+                                {/* Proxy */}
+                                <div className="col-span-2 flex items-center gap-1.5 min-w-0">
+                                  <ProxyChainBadge chains={ip.chains} />
+                                </div>
+
                                 {/* Location */}
                                 <div className="col-span-2 flex items-center gap-1.5 min-w-0">
                                     {ip.geoIP && ip.geoIP.length > 0 ? (
                                       <>
                                         <CountryFlag country={ip.geoIP[0]} className="h-3.5 w-5" title={ip.geoIP[1] || ip.geoIP[0]} />
-                                      <span className="text-xs truncate">{ip.geoIP[1] || ip.geoIP[0]}</span>
+                                      <span className="text-xs whitespace-nowrap">{ip.geoIP[1] || ip.geoIP[0]}</span>
                                     </>
                                   ) : (
                                     <span className="text-xs text-muted-foreground">-</span>
@@ -1304,7 +1411,7 @@ export function InteractiveRuleStats({
                                 </div>
 
                                 {/* Upload */}
-                                <div className="col-span-2 text-right tabular-nums text-sm">
+                                <div className="col-span-1 text-right tabular-nums text-sm">
                                   <span className="text-purple-500">{formatBytes(ip.totalUpload)}</span>
                                 </div>
 
@@ -1316,7 +1423,7 @@ export function InteractiveRuleStats({
                                 </div>
 
                                 {/* Domains Count - Clickable */}
-                                <div className="col-span-2 flex items-center justify-end">
+                                <div className="col-span-1 flex items-center justify-end">
                                   <Button
                                     variant="ghost"
                                     size="sm"
@@ -1384,6 +1491,13 @@ export function InteractiveRuleStats({
                                   </Button>
                                 </div>
 
+                                {/* Proxy row */}
+                                {ip.chains && ip.chains.length > 0 && (
+                                  <div className="flex items-center gap-1.5 mb-2 pl-[30px]">
+                                    <ProxyChainBadge chains={ip.chains} truncateLabel={false} />
+                                  </div>
+                                )}
+
                                 {/* Bottom: Stats row */}
                                 <div className="flex items-center justify-between text-xs pl-[30px]">
                                   <span className="text-blue-500 tabular-nums">↓ {formatBytes(ip.totalDownload)}</span>
@@ -1394,35 +1508,21 @@ export function InteractiveRuleStats({
                                 </div>
                               </div>
 
-                              {/* Expanded Details: Associated Domains */}
+                              {/* Expanded Details: Proxy Traffic + Associated Domains */}
                               {isExpanded && (
-                                <div className="px-4 sm:px-5 pb-4 bg-secondary/5">
-                                  <div className="pt-3">
-                                    {/* Associated Domains */}
-                                    <div className="px-1">
-                                      <p className="text-xs font-medium text-muted-foreground mb-2.5 flex items-center gap-1.5">
-                                        <Link2 className="h-3 w-3" />
-                                        {ipsT("associatedDomains")}
-                                      </p>
-                                      <div className="flex flex-wrap gap-2">
-                                        {ip.domains.map((domain) => {
-                                          const domainColor = getDomainColor(domain);
-                                          return (
-                                            <div
-                                              key={domain}
-                                              className="flex items-center gap-2 px-2.5 py-1.5 sm:px-3 sm:py-2 rounded-lg bg-card border border-border/50 hover:border-primary/30 hover:shadow-sm transition-all"
-                                            >
-                                              <div className={`w-5 h-5 sm:w-6 sm:h-6 rounded-md ${domainColor.bg} ${domainColor.text} flex items-center justify-center shrink-0`}>
-                                                <Globe className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
-                                              </div>
-                                              <span className="text-xs font-medium truncate max-w-[180px] sm:max-w-[200px]">{domain}</span>
-                                            </div>
-                                          );
-                                        })}
-                                      </div>
-                                    </div>
-                                  </div>
-                                </div>
+                                <IPExpandedDetails
+                                  ip={ip}
+                                  proxyStats={ipProxyStats[ip.ip]}
+                                  proxyStatsLoading={ipProxyStatsLoading === ip.ip}
+                                  domainDetails={ipDomainDetails[ip.ip]}
+                                  domainDetailsLoading={ipDomainDetailsLoading === ip.ip}
+                                  associatedDomainsIcon="link"
+                                  labels={{
+                                    proxyTraffic: ipsT("proxyTraffic"),
+                                    associatedDomains: ipsT("associatedDomains"),
+                                    conn: ipsT("conn"),
+                                  }}
+                                />
                               )}
                             </div>
                           );

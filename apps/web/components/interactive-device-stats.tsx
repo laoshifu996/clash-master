@@ -312,10 +312,24 @@ export function InteractiveDeviceStats({
             <TabsTrigger value="ips">IP Addresses</TabsTrigger>
           </TabsList>
           <TabsContent value="domains" className="mt-4">
-            <DomainStatsTable domains={deviceDomains} loading={loading} />
+            <DomainStatsTable
+              domains={deviceDomains}
+              loading={loading}
+              activeBackendId={activeBackendId}
+              timeRange={timeRange}
+              sourceIP={selectedDevice ?? undefined}
+              richExpand
+            />
           </TabsContent>
           <TabsContent value="ips" className="mt-4">
-            <IPStatsTable ips={deviceIPs} loading={loading} />
+            <IPStatsTable
+              ips={deviceIPs}
+              loading={loading}
+              activeBackendId={activeBackendId}
+              timeRange={timeRange}
+              sourceIP={selectedDevice ?? undefined}
+              richExpand
+            />
           </TabsContent>
         </Tabs>
       )}

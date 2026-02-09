@@ -15,8 +15,12 @@ interface TopProxiesSimpleProps {
 }
 
 function simplifyProxyName(name: string): string {
-  // Keep original name with emojis, just trim whitespace
-  return name.trim();
+  const normalized = name.trim();
+  const parts = normalized
+    .split(">")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parts[0] || normalized;
 }
 
 export const TopProxiesSimple = React.memo(

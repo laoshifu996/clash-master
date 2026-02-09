@@ -20,10 +20,15 @@ type SortBy = "traffic" | "connections";
 const COLORS = ["#3B82F6", "#8B5CF6", "#06B6D4", "#10B981", "#F59E0B", "#EF4444"];
 
 function normalizeProxyName(name: string): string {
-  return name
+  const normalized = name
     .replace(/^\["?/, "")
     .replace(/"?\]$/, "")
     .trim();
+  const parts = normalized
+    .split(">")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parts[0] || normalized;
 }
 
 function formatProxyName(name: string): string {

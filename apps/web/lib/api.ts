@@ -228,33 +228,77 @@ export const api = {
       buildUrl(`${API_BASE}/stats/connections`, { backendId, limit })
     ),
     
-  getDomainProxyStats: (domain: string, backendId?: number, range?: TimeRange) =>
+  getDomainProxyStats: (
+    domain: string,
+    backendId?: number,
+    range?: TimeRange,
+    sourceIP?: string,
+    sourceChain?: string,
+  ) =>
     fetchJson<ProxyTrafficStats[]>(
       buildUrl(`${API_BASE}/stats/domains/proxy-stats`, {
         domain,
         backendId,
         start: range?.start,
         end: range?.end,
+        sourceIP,
+        sourceChain,
       })
     ),
 
-  getDomainIPDetails: (domain: string, backendId?: number, range?: TimeRange) =>
+  getDomainIPDetails: (
+    domain: string,
+    backendId?: number,
+    range?: TimeRange,
+    sourceIP?: string,
+    sourceChain?: string,
+  ) =>
     fetchJson<IPStats[]>(
       buildUrl(`${API_BASE}/stats/domains/ip-details`, {
         domain,
         backendId,
         start: range?.start,
         end: range?.end,
+        sourceIP,
+        sourceChain,
       })
     ),
 
-  getIPProxyStats: (ip: string, backendId?: number, range?: TimeRange) =>
+  getIPProxyStats: (
+    ip: string,
+    backendId?: number,
+    range?: TimeRange,
+    sourceIP?: string,
+    sourceChain?: string,
+  ) =>
     fetchJson<ProxyTrafficStats[]>(
       buildUrl(`${API_BASE}/stats/ips/proxy-stats`, {
         ip,
         backendId,
         start: range?.start,
         end: range?.end,
+        sourceIP,
+        sourceChain,
+      })
+    ),
+
+  getIPDomainDetails: (
+    ip: string,
+    backendId?: number,
+    range?: TimeRange,
+    sourceIP?: string,
+    limit = DETAIL_FETCH_LIMIT,
+    sourceChain?: string,
+  ) =>
+    fetchJson<DomainStats[]>(
+      buildUrl(`${API_BASE}/stats/ips/domain-details`, {
+        ip,
+        limit,
+        backendId,
+        start: range?.start,
+        end: range?.end,
+        sourceIP,
+        sourceChain,
       })
     ),
 
@@ -323,6 +367,74 @@ export const api = {
     fetchJson<IPStats[]>(
       buildUrl(`${API_BASE}/stats/rules/ips`, {
         rule,
+        limit,
+        backendId,
+        start: range?.start,
+        end: range?.end,
+      })
+    ),
+
+  getRuleDomainProxyStats: (
+    rule: string,
+    domain: string,
+    backendId?: number,
+    range?: TimeRange,
+  ) =>
+    fetchJson<ProxyTrafficStats[]>(
+      buildUrl(`${API_BASE}/stats/rules/domains/proxy-stats`, {
+        rule,
+        domain,
+        backendId,
+        start: range?.start,
+        end: range?.end,
+      })
+    ),
+
+  getRuleDomainIPDetails: (
+    rule: string,
+    domain: string,
+    backendId?: number,
+    range?: TimeRange,
+    limit = DETAIL_FETCH_LIMIT,
+  ) =>
+    fetchJson<IPStats[]>(
+      buildUrl(`${API_BASE}/stats/rules/domains/ip-details`, {
+        rule,
+        domain,
+        limit,
+        backendId,
+        start: range?.start,
+        end: range?.end,
+      })
+    ),
+
+  getRuleIPProxyStats: (
+    rule: string,
+    ip: string,
+    backendId?: number,
+    range?: TimeRange,
+  ) =>
+    fetchJson<ProxyTrafficStats[]>(
+      buildUrl(`${API_BASE}/stats/rules/ips/proxy-stats`, {
+        rule,
+        ip,
+        backendId,
+        start: range?.start,
+        end: range?.end,
+      })
+    ),
+
+  getRuleIPDomainDetails: (
+    rule: string,
+    ip: string,
+    backendId?: number,
+    range?: TimeRange,
+    limit = DETAIL_FETCH_LIMIT,
+  ) =>
+    fetchJson<DomainStats[]>(
+      buildUrl(`${API_BASE}/stats/rules/ips/domain-details`, {
+        rule,
+        ip,
         limit,
         backendId,
         start: range?.start,

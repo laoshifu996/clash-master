@@ -1,7 +1,18 @@
 "use client";
 
-import { useState, useMemo } from "react";
-import { ChevronLeft, ChevronRight, Loader2, Rows3, ArrowUpDown, ArrowDown, ArrowUp, Globe, ChevronDown, ChevronUp, Server } from "lucide-react";
+import { useState, useMemo, useCallback, useEffect } from "react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Loader2,
+  Rows3,
+  ArrowUpDown,
+  ArrowDown,
+  ArrowUp,
+  ChevronDown,
+  ChevronUp,
+  Server,
+} from "lucide-react";
 import { useTranslations } from "next-intl";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -14,32 +25,48 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { formatBytes, formatNumber } from "@/lib/utils";
 import { cn } from "@/lib/utils";
+import { api, type TimeRange } from "@/lib/api";
 import { Favicon } from "@/components/favicon";
-import { 
-  PAGE_SIZE_OPTIONS, 
-  getIPGradient, 
+import { DomainExpandedDetails } from "@/components/stats-tables/expanded-details";
+import { ProxyChainBadge } from "@/components/proxy-chain-badge";
+import {
+  PAGE_SIZE_OPTIONS,
   getPageNumbers,
   type PageSize,
   type DomainSortKey,
   type SortOrder,
 } from "@/lib/stats-utils";
-import type { DomainStats } from "@clashmaster/shared";
+import type { DomainStats, ProxyTrafficStats, IPStats } from "@clashmaster/shared";
 
 interface DomainStatsTableProps {
   domains: DomainStats[];
   loading?: boolean;
   title?: string;
   showHeader?: boolean;
+  activeBackendId?: number;
+  timeRange?: TimeRange;
+  sourceIP?: string;
+  sourceChain?: string;
+  richExpand?: boolean;
+  showProxyColumn?: boolean;
+  showProxyTrafficInExpand?: boolean;
 }
 
-export function DomainStatsTable({ 
-  domains, 
+export function DomainStatsTable({
+  domains,
   loading = false,
   title,
   showHeader = true,
+  activeBackendId,
+  timeRange,
+  sourceIP,
+  sourceChain,
+  richExpand = false,
+  showProxyColumn = true,
+  showProxyTrafficInExpand = true,
 }: DomainStatsTableProps) {
   const t = useTranslations("domains");
-  
+
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<PageSize>(10);
   const [search, setSearch] = useState("");
@@ -47,7 +74,92 @@ export function DomainStatsTable({
   const [sortOrder, setSortOrder] = useState<SortOrder>("desc");
   const [expandedDomain, setExpandedDomain] = useState<string | null>(null);
 
-  // Sort handler
+  const [proxyStats, setProxyStats] = useState<Record<string, ProxyTrafficStats[]>>({});
+  const [proxyStatsLoading, setProxyStatsLoading] = useState<string | null>(null);
+  const [ipDetails, setIPDetails] = useState<Record<string, IPStats[]>>({});
+  const [ipDetailsLoading, setIPDetailsLoading] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Context switch (backend/device/proxy/rule binding change): collapse.
+    setExpandedDomain(null);
+    setProxyStats({});
+    setIPDetails({});
+    setProxyStatsLoading(null);
+    setIPDetailsLoading(null);
+  }, [activeBackendId, sourceIP, sourceChain, richExpand]);
+
+  const fetchProxyStats = useCallback(
+    async (domain: string, options?: { force?: boolean; background?: boolean }) => {
+      const force = options?.force ?? false;
+      const background = options?.background ?? false;
+      const hasCached = !!proxyStats[domain];
+      if (!richExpand || (!force && hasCached)) return;
+      if (!background || !hasCached) {
+        setProxyStatsLoading(domain);
+      }
+      try {
+        const stats = await api.getDomainProxyStats(
+          domain,
+          activeBackendId,
+          timeRange,
+          sourceIP,
+          sourceChain,
+        );
+        setProxyStats((prev) => ({ ...prev, [domain]: stats }));
+      } catch (err) {
+        console.error(`Failed to fetch proxy stats for ${domain}:`, err);
+        setProxyStats((prev) => ({ ...prev, [domain]: [] }));
+      } finally {
+        if (proxyStatsLoading === domain) {
+          setProxyStatsLoading(null);
+        }
+      }
+    },
+    [proxyStats, activeBackendId, timeRange, sourceIP, sourceChain, richExpand, proxyStatsLoading],
+  );
+
+  const fetchIPDetails = useCallback(
+    async (domain: string, options?: { force?: boolean; background?: boolean }) => {
+      const force = options?.force ?? false;
+      const background = options?.background ?? false;
+      const hasCached = !!ipDetails[domain];
+      if (!richExpand || (!force && hasCached)) return;
+      if (!background || !hasCached) {
+        setIPDetailsLoading(domain);
+      }
+      try {
+        const details = await api.getDomainIPDetails(
+          domain,
+          activeBackendId,
+          timeRange,
+          sourceIP,
+          sourceChain,
+        );
+        setIPDetails((prev) => ({ ...prev, [domain]: details }));
+      } catch (err) {
+        console.error(`Failed to fetch IP details for ${domain}:`, err);
+        setIPDetails((prev) => ({ ...prev, [domain]: [] }));
+      } finally {
+        if (ipDetailsLoading === domain) {
+          setIPDetailsLoading(null);
+        }
+      }
+    },
+    [ipDetails, activeBackendId, timeRange, sourceIP, sourceChain, richExpand, ipDetailsLoading],
+  );
+
+  useEffect(() => {
+    if (!expandedDomain || !richExpand) return;
+    fetchProxyStats(expandedDomain);
+    fetchIPDetails(expandedDomain);
+  }, [expandedDomain, richExpand, fetchProxyStats, fetchIPDetails]);
+
+  useEffect(() => {
+    if (!expandedDomain || !richExpand) return;
+    fetchProxyStats(expandedDomain, { force: true, background: true });
+    fetchIPDetails(expandedDomain, { force: true, background: true });
+  }, [timeRange?.start, timeRange?.end, expandedDomain, richExpand, fetchProxyStats, fetchIPDetails]);
+
   const handleSort = (key: DomainSortKey) => {
     if (sortKey === key) {
       setSortOrder(sortOrder === "asc" ? "desc" : "asc");
@@ -58,12 +170,15 @@ export function DomainStatsTable({
     setPage(1);
   };
 
-  // Toggle expand
   const toggleExpand = (domain: string) => {
-    setExpandedDomain(expandedDomain === domain ? null : domain);
+    const newExpanded = expandedDomain === domain ? null : domain;
+    setExpandedDomain(newExpanded);
+    if (newExpanded && richExpand) {
+      fetchProxyStats(newExpanded);
+      fetchIPDetails(newExpanded);
+    }
   };
 
-  // Sort icon component
   const SortIcon = ({ column }: { column: DomainSortKey }) => {
     if (sortKey !== column) return <ArrowUpDown className="ml-1 h-3 w-3 text-muted-foreground" />;
     return sortOrder === "asc" ? (
@@ -73,12 +188,11 @@ export function DomainStatsTable({
     );
   };
 
-  // Filter and sort
   const filteredDomains = useMemo(() => {
     let result = [...domains];
     if (search) {
       const lower = search.toLowerCase();
-      result = result.filter(d => d.domain.toLowerCase().includes(lower));
+      result = result.filter((d) => d.domain.toLowerCase().includes(lower));
     }
     result.sort((a, b) => {
       const aVal = a[sortKey] ?? "";
@@ -91,17 +205,16 @@ export function DomainStatsTable({
     return result;
   }, [domains, search, sortKey, sortOrder]);
 
-  // Paginate
   const paginatedDomains = useMemo(() => {
     const start = (page - 1) * pageSize;
     return filteredDomains.slice(start, start + pageSize);
   }, [filteredDomains, page, pageSize]);
 
   const totalPages = Math.ceil(filteredDomains.length / pageSize);
+  const domainColumnClass = showProxyColumn ? "col-span-3" : "col-span-5";
 
   return (
     <Card>
-      {/* Header with search */}
       {showHeader && (
         <div className="p-4 border-b border-border/50">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
@@ -137,42 +250,44 @@ export function DomainStatsTable({
           </div>
         ) : (
           <>
-            {/* Desktop Table Header */}
             <div className="hidden sm:grid grid-cols-12 gap-3 px-5 py-3 bg-secondary/30 text-xs font-medium text-muted-foreground uppercase tracking-wider">
-              <div 
-                className="col-span-4 flex items-center cursor-pointer hover:text-foreground transition-colors"
+              <div
+                className={cn(
+                  domainColumnClass,
+                  "flex items-center cursor-pointer hover:text-foreground transition-colors",
+                )}
                 onClick={() => handleSort("domain")}
               >
                 {t("domain")}
                 <SortIcon column="domain" />
               </div>
-              <div 
+              {showProxyColumn && (
+                <div className="col-span-2 flex items-center">{t("proxy")}</div>
+              )}
+              <div
                 className="col-span-2 flex items-center justify-end cursor-pointer hover:text-foreground transition-colors"
                 onClick={() => handleSort("totalDownload")}
               >
                 {t("download")}
                 <SortIcon column="totalDownload" />
               </div>
-              <div 
+              <div
                 className="col-span-2 flex items-center justify-end cursor-pointer hover:text-foreground transition-colors"
                 onClick={() => handleSort("totalUpload")}
               >
                 {t("upload")}
                 <SortIcon column="totalUpload" />
               </div>
-              <div 
-                className="col-span-2 flex items-center justify-end cursor-pointer hover:text-foreground transition-colors"
+              <div
+                className="col-span-1 flex items-center justify-end cursor-pointer hover:text-foreground transition-colors"
                 onClick={() => handleSort("totalConnections")}
               >
                 {t("conn")}
                 <SortIcon column="totalConnections" />
               </div>
-              <div className="col-span-2 flex items-center justify-end">
-                {t("ipCount")}
-              </div>
+              <div className="col-span-2 flex items-center justify-end">{t("ipCount")}</div>
             </div>
 
-            {/* Mobile Sort Bar */}
             <div className="sm:hidden flex items-center gap-2 px-4 py-2 bg-secondary/30 overflow-x-auto scrollbar-hide">
               {([
                 { key: "domain" as DomainSortKey, label: t("domain") },
@@ -186,69 +301,67 @@ export function DomainStatsTable({
                     "flex items-center gap-0.5 px-2 py-1 rounded-md text-xs font-medium whitespace-nowrap transition-colors",
                     sortKey === key
                       ? "bg-primary/10 text-primary"
-                      : "text-muted-foreground hover:text-foreground"
+                      : "text-muted-foreground hover:text-foreground",
                   )}
                   onClick={() => handleSort(key)}
                 >
                   {label}
-                  {sortKey === key && (
-                    sortOrder === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />
-                  )}
+                  {sortKey === key &&
+                    (sortOrder === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />)}
                 </button>
               ))}
             </div>
 
-            {/* Domain List */}
             <div className="divide-y divide-border/30">
               {paginatedDomains.map((domain, index) => {
                 const isExpanded = expandedDomain === domain.domain;
-                
+
                 return (
                   <div key={domain.domain} className="group">
-                    {/* Desktop Row */}
                     <div
                       className={cn(
                         "hidden sm:grid grid-cols-12 gap-3 px-5 py-4 items-center hover:bg-secondary/20 transition-colors cursor-pointer",
-                        isExpanded && "bg-secondary/10"
+                        isExpanded && "bg-secondary/10",
                       )}
                       style={{ animationDelay: `${index * 50}ms` }}
                       onClick={() => toggleExpand(domain.domain)}
                     >
-                      {/* Domain with Favicon */}
-                      <div className="col-span-4 flex items-center gap-3 min-w-0">
+                      <div className={cn(domainColumnClass, "flex items-center gap-3 min-w-0")}>
                         <Favicon domain={domain.domain} size="sm" className="shrink-0" />
                         <span className="font-medium text-sm truncate" title={domain.domain}>
-                          {domain.domain}
+                          {domain.domain || t("unknown")}
                         </span>
                       </div>
 
-                      {/* Download */}
+                      {showProxyColumn && (
+                        <div className="col-span-2 flex items-center gap-1.5 min-w-0">
+                          <ProxyChainBadge chains={domain.chains} />
+                        </div>
+                      )}
+
                       <div className="col-span-2 text-right tabular-nums text-sm">
                         <span className="text-blue-500">{formatBytes(domain.totalDownload)}</span>
                       </div>
 
-                      {/* Upload */}
                       <div className="col-span-2 text-right tabular-nums text-sm">
                         <span className="text-purple-500">{formatBytes(domain.totalUpload)}</span>
                       </div>
 
-                      {/* Connections */}
-                      <div className="col-span-2 flex items-center justify-end">
+                      <div className="col-span-1 flex items-center justify-end">
                         <span className="px-2 py-0.5 rounded-full bg-secondary text-xs font-medium">
                           {formatNumber(domain.totalConnections)}
                         </span>
                       </div>
 
-                      {/* IP Count - Clickable */}
                       <div className="col-span-2 flex items-center justify-end">
                         <Button
                           variant="ghost"
                           size="sm"
                           className={cn(
                             "h-7 px-2 gap-1 text-xs font-medium transition-all",
-                            isExpanded 
-                              ? "bg-primary/10 text-primary hover:bg-primary/20" 
-                              : "bg-secondary/50 text-muted-foreground hover:text-foreground hover:bg-secondary"
+                            isExpanded
+                              ? "bg-primary/10 text-primary hover:bg-primary/20"
+                              : "bg-secondary/50 text-muted-foreground hover:text-foreground hover:bg-secondary",
                           )}
                           onClick={(e) => {
                             e.stopPropagation();
@@ -266,28 +379,24 @@ export function DomainStatsTable({
                       </div>
                     </div>
 
-                    {/* Mobile Row - Card-style layout */}
                     <div
                       className={cn(
                         "sm:hidden px-4 py-3 hover:bg-secondary/20 transition-colors cursor-pointer",
-                        isExpanded && "bg-secondary/10"
+                        isExpanded && "bg-secondary/10",
                       )}
                       onClick={() => toggleExpand(domain.domain)}
                     >
-                      {/* Top: Favicon + Domain + Expand */}
                       <div className="flex items-center gap-2.5 mb-2">
                         <Favicon domain={domain.domain} size="sm" className="shrink-0" />
                         <span className="font-medium text-sm truncate flex-1" title={domain.domain}>
-                          {domain.domain}
+                          {domain.domain || t("unknown")}
                         </span>
                         <Button
                           variant="ghost"
                           size="sm"
                           className={cn(
                             "h-7 px-2 gap-1 text-xs font-medium shrink-0",
-                            isExpanded 
-                              ? "bg-primary/10 text-primary" 
-                              : "bg-secondary/50 text-muted-foreground"
+                            isExpanded ? "bg-primary/10 text-primary" : "bg-secondary/50 text-muted-foreground",
                           )}
                           onClick={(e) => {
                             e.stopPropagation();
@@ -300,7 +409,12 @@ export function DomainStatsTable({
                         </Button>
                       </div>
 
-                      {/* Bottom: Stats row */}
+                      {showProxyColumn && domain.chains && domain.chains.length > 0 && (
+                        <div className="flex items-center gap-1.5 mb-2 pl-[30px]">
+                          <ProxyChainBadge chains={domain.chains} truncateLabel={false} />
+                        </div>
+                      )}
+
                       <div className="flex items-center justify-between text-xs pl-[30px]">
                         <span className="text-blue-500 tabular-nums">↓ {formatBytes(domain.totalDownload)}</span>
                         <span className="text-purple-500 tabular-nums">↑ {formatBytes(domain.totalUpload)}</span>
@@ -310,41 +424,27 @@ export function DomainStatsTable({
                       </div>
                     </div>
 
-                    {/* Expanded Details: Associated IPs */}
-                    {isExpanded && domain.ips && domain.ips.length > 0 && (
-                      <div className="px-4 sm:px-5 pb-4 bg-secondary/5">
-                        <div className="pt-3">
-                          <div className="px-1">
-                            <p className="text-xs font-medium text-muted-foreground mb-2.5 flex items-center gap-1.5">
-                              <Globe className="h-3 w-3" />
-                              {t("associatedIPs")}
-                            </p>
-                            <div className="flex flex-wrap gap-2">
-                              {domain.ips.map((ip) => {
-                                const gradient = getIPGradient(ip);
-                                return (
-                                  <div
-                                    key={ip}
-                                    className="flex items-center gap-2 px-2.5 py-1.5 sm:px-3 sm:py-2 rounded-lg bg-card border border-border/50 hover:border-primary/30 hover:shadow-sm transition-all"
-                                  >
-                                    <div className={`w-5 h-5 sm:w-6 sm:h-6 rounded-md bg-gradient-to-br ${gradient} flex items-center justify-center shrink-0`}>
-                                      <Server className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-white" />
-                                    </div>
-                                    <code className="text-xs font-mono break-all">{ip}</code>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        </div>
-                      </div>
+                    {isExpanded && (
+                      <DomainExpandedDetails
+                        domain={domain}
+                        richExpand={richExpand}
+                        proxyStats={proxyStats[domain.domain]}
+                        proxyStatsLoading={proxyStatsLoading === domain.domain}
+                        ipDetails={ipDetails[domain.domain]}
+                        ipDetailsLoading={ipDetailsLoading === domain.domain}
+                        labels={{
+                          proxyTraffic: t("proxyTraffic"),
+                          associatedIPs: t("associatedIPs"),
+                          conn: t("conn"),
+                        }}
+                        showProxyTraffic={showProxyTrafficInExpand}
+                      />
                     )}
                   </div>
                 );
               })}
             </div>
 
-            {/* Pagination */}
             {filteredDomains.length > 0 && (
               <div className="p-3 border-t border-border/50 bg-secondary/20">
                 <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
@@ -384,14 +484,16 @@ export function DomainStatsTable({
                         variant="ghost"
                         size="icon"
                         className="h-8 w-8"
-                        onClick={() => setPage(p => Math.max(1, p - 1))}
+                        onClick={() => setPage((p) => Math.max(1, p - 1))}
                         disabled={page === 1}
                       >
                         <ChevronLeft className="h-4 w-4" />
                       </Button>
-                      {getPageNumbers(page, totalPages).map((p, idx) => (
-                        p === '...' ? (
-                          <span key={`ellipsis-${idx}`} className="px-1 text-muted-foreground text-xs">...</span>
+                      {getPageNumbers(page, totalPages).map((p, idx) =>
+                        p === "..." ? (
+                          <span key={`ellipsis-${idx}`} className="px-1 text-muted-foreground text-xs">
+                            ...
+                          </span>
                         ) : (
                           <Button
                             key={p}
@@ -402,13 +504,13 @@ export function DomainStatsTable({
                           >
                             {p}
                           </Button>
-                        )
-                      ))}
+                        ),
+                      )}
                       <Button
                         variant="ghost"
                         size="icon"
                         className="h-8 w-8"
-                        onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                        onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                         disabled={page === totalPages}
                       >
                         <ChevronRight className="h-4 w-4" />

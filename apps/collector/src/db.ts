@@ -777,6 +777,7 @@ export class StatsDatabase {
     const ruleName = update.chains.length > 1 ? update.chains[update.chains.length - 1] : 
                      update.rulePayload ? `${update.rule}(${update.rulePayload})` : update.rule;
     const finalProxy = update.chains.length > 0 ? update.chains[0] : 'DIRECT';
+    const fullChain = update.chains.join(' > ') || update.chain || 'DIRECT';
 
     const transaction = this.db.transaction(() => {
       // Update domain stats with backend_id (skip if domain is unknown)
@@ -814,7 +815,7 @@ export class StatsDatabase {
           download: update.download,
           timestamp,
           rule: ruleName,
-          chain: update.chain
+          chain: fullChain
         });
       }
 
@@ -843,8 +844,6 @@ export class StatsDatabase {
             ELSE ip_stats.rules || ',' || @rule
           END
       `);
-      // Store full chain path (joined with > for clarity)
-      const fullChain = update.chains.join(' > ');
       ipStmt.run({
         backendId,
         ip: update.ip,
@@ -868,7 +867,7 @@ export class StatsDatabase {
       `);
       proxyStmt.run({
         backendId,
-        chain: update.chain,
+        chain: fullChain,
         upload: update.upload,
         download: update.download,
         timestamp
@@ -1001,7 +1000,7 @@ export class StatsDatabase {
         domainProxyStmt.run({
           backendId,
           domain: domainName,
-          chain: update.chain,
+          chain: fullChain,
           upload: update.upload,
           download: update.download,
           timestamp
@@ -1027,7 +1026,7 @@ export class StatsDatabase {
       ipProxyStmt.run({
         backendId,
         ip: update.ip,
-        chain: update.chain,
+        chain: fullChain,
         upload: update.upload,
         download: update.download,
         timestamp,
@@ -1080,13 +1079,14 @@ export class StatsDatabase {
       const ruleName = update.chains.length > 1 ? update.chains[update.chains.length - 1] : 
                        update.rulePayload ? `${update.rule}(${update.rulePayload})` : update.rule;
       const finalProxy = update.chains.length > 0 ? update.chains[0] : 'DIRECT';
+      const fullChain = update.chains.join(' > ') || update.chain || 'DIRECT';
       const eventDate = new Date(update.timestampMs ?? now.getTime());
       const hourKey = this.toHourKey(eventDate);
       const minuteKey = this.toMinuteKey(eventDate);
 
       // Aggregate domain stats
       if (update.domain) {
-        const domainKey = `${update.domain}:${update.ip}:${update.chain}`;
+        const domainKey = `${update.domain}:${update.ip}:${fullChain}`;
         const existing = domainMap.get(domainKey);
         if (existing) {
           existing.upload += update.upload;
@@ -1098,7 +1098,7 @@ export class StatsDatabase {
       }
 
       // Aggregate IP stats
-      const ipKey = `${update.ip}:${update.domain}:${update.chain}`;
+      const ipKey = `${update.ip}:${update.domain}:${fullChain}`;
       const existingIp = ipMap.get(ipKey);
       if (existingIp) {
         existingIp.upload += update.upload;
@@ -1109,7 +1109,7 @@ export class StatsDatabase {
       }
 
       // Aggregate chain stats
-      const chainKey = update.chain;
+      const chainKey = fullChain;
       const existingChain = chainMap.get(chainKey);
       if (existingChain) {
         existingChain.upload += update.upload;
@@ -1199,7 +1199,7 @@ export class StatsDatabase {
       const dimDomain = update.domain || '';
       const dimIP = update.ip || '';
       const dimSourceIP = update.sourceIP || '';
-      const dimChain = update.chain || 'DIRECT';
+      const dimChain = fullChain;
       const dimKey = `${minuteKey}:${dimDomain}:${dimIP}:${dimSourceIP}:${dimChain}:${ruleName}`;
       const existingDim = minuteDimMap.get(dimKey);
       if (existingDim) {
@@ -1221,7 +1221,7 @@ export class StatsDatabase {
       }
 
       // Aggregate domain_proxy_stats (only when domain exists)
-      const proxyChain = update.chain;
+      const proxyChain = fullChain;
       if (update.domain) {
         const dpKey = `${update.domain}:${proxyChain}`;
         const existingDP = domainProxyMap.get(dpKey);
@@ -1783,6 +1783,35 @@ export class StatsDatabase {
     return parts[0] || chain;
   }
 
+  private aggregateProxyStatsByFirstHop(rows: ProxyStats[]): ProxyStats[] {
+    const merged = new Map<string, ProxyStats>();
+
+    for (const row of rows) {
+      const hop = this.getChainFirstHop(row.chain || "") || "DIRECT";
+      const existing = merged.get(hop);
+      if (existing) {
+        existing.totalUpload += row.totalUpload;
+        existing.totalDownload += row.totalDownload;
+        existing.totalConnections += row.totalConnections;
+        if (row.lastSeen > existing.lastSeen) {
+          existing.lastSeen = row.lastSeen;
+        }
+      } else {
+        merged.set(hop, {
+          chain: hop,
+          totalUpload: row.totalUpload,
+          totalDownload: row.totalDownload,
+          totalConnections: row.totalConnections,
+          lastSeen: row.lastSeen,
+        });
+      }
+    }
+
+    return Array.from(merged.values()).sort(
+      (a, b) => (b.totalDownload + b.totalUpload) - (a.totalDownload + a.totalUpload),
+    );
+  }
+
   private allocateByWeights(total: number, weights: number[]): number[] {
     if (weights.length === 0) return [];
     const sum = weights.reduce((acc, w) => acc + w, 0);
@@ -1951,6 +1980,71 @@ export class StatsDatabase {
     return [rule, ...reversed];
   }
 
+  private uniqueNonEmpty(values: string[]): string[] {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const raw of values) {
+      const v = (raw || "").trim();
+      if (!v || seen.has(v)) continue;
+      seen.add(v);
+      out.push(v);
+    }
+    return out;
+  }
+
+  /**
+   * Some range queries aggregate from minute_dim_stats where historical rows may
+   * only contain the final proxy hop in `chain`. This method expands those
+   * short hops to full chains using rule_chain_traffic when possible.
+   */
+  private expandShortChainsForRules(
+    backendId: number,
+    chains: string[],
+    rules: string[],
+  ): string[] {
+    const normalizedChains = this.uniqueNonEmpty(chains);
+    if (normalizedChains.length === 0) return [];
+
+    const shortChains = normalizedChains.filter((c) => !c.includes(">"));
+    if (shortChains.length === 0) return normalizedChains;
+
+    const normalizedRules = this.uniqueNonEmpty(rules);
+    const whereParts: string[] = [];
+    const params: Array<string | number> = [backendId];
+
+    if (normalizedRules.length > 0) {
+      const rulePlaceholders = normalizedRules.map(() => "?").join(", ");
+      whereParts.push(`rule IN (${rulePlaceholders})`);
+      params.push(...normalizedRules);
+    }
+
+    const chainMatchers: string[] = [];
+    for (const chain of shortChains) {
+      chainMatchers.push("(chain = ? OR chain LIKE ?)");
+      params.push(chain, `${chain} > %`);
+    }
+    whereParts.push(`(${chainMatchers.join(" OR ")})`);
+
+    const whereClause = whereParts.length > 0 ? `AND ${whereParts.join(" AND ")}` : "";
+    const stmt = this.db.prepare(`
+      SELECT DISTINCT chain
+      FROM rule_chain_traffic
+      WHERE backend_id = ? ${whereClause}
+      LIMIT 500
+    `);
+
+    const rows = stmt.all(...params) as Array<{ chain: string }>;
+    const expanded = this.uniqueNonEmpty(rows.map((r) => r.chain));
+
+    if (expanded.length === 0) {
+      return normalizedChains;
+    }
+
+    // Prefer expanded full chains, but keep already-full values from input too.
+    const fullInputChains = normalizedChains.filter((c) => c.includes(">"));
+    return this.uniqueNonEmpty([...expanded, ...fullInputChains]);
+  }
+
   // Get a specific domain by name
   getDomainByName(backendId: number, domain: string): DomainStats | null {
     const stmt = this.db.prepare(`
@@ -2016,12 +2110,16 @@ export class StatsDatabase {
         chains: string | null;
       }>;
 
-      return rows.map(row => ({
-        ...row,
-        ips: row.ips ? row.ips.split(',').filter(Boolean) : [],
-        rules: row.rules ? row.rules.split(',').filter(Boolean) : [],
-        chains: row.chains ? row.chains.split(',').filter(Boolean) : [],
-      })) as DomainStats[];
+      return rows.map(row => {
+        const rules = row.rules ? row.rules.split(',').filter(Boolean) : [];
+        const chains = row.chains ? row.chains.split(',').filter(Boolean) : [];
+        return {
+          ...row,
+          ips: row.ips ? row.ips.split(',').filter(Boolean) : [],
+          rules,
+          chains: this.expandShortChainsForRules(backendId, chains, rules),
+        };
+      }) as DomainStats[];
     }
 
     const stmt = this.db.prepare(`
@@ -2043,12 +2141,16 @@ export class StatsDatabase {
       chains: string | null;
     }>;
     
-    return rows.map(row => ({
-      ...row,
-      ips: row.ips ? row.ips.split(',') : [],
-      rules: row.rules ? row.rules.split(',') : [],
-      chains: row.chains ? row.chains.split(',') : [],
-    })) as DomainStats[];
+    return rows.map(row => {
+      const rules = row.rules ? row.rules.split(',').filter(Boolean) : [];
+      const chains = row.chains ? row.chains.split(',').filter(Boolean) : [];
+      return {
+        ...row,
+        ips: row.ips ? row.ips.split(',') : [],
+        rules,
+        chains: this.expandShortChainsForRules(backendId, chains, rules),
+      };
+    }) as DomainStats[];
   }
 
   // Get IP stats for specific IPs (used for domain IP details)
@@ -2113,9 +2215,26 @@ export class StatsDatabase {
     start?: string,
     end?: string,
     limit = 100,
+    sourceIP?: string,
+    sourceChain?: string,
   ): IPStats[] {
     const range = this.parseMinuteRange(start, end);
-    if (range) {
+    if (range || sourceIP || sourceChain) {
+      const conditions = ["m.backend_id = ?", "m.domain = ?", "m.ip != ''"];
+      const params: Array<string | number> = [backendId, domain];
+      if (range) {
+        conditions.push("m.minute >= ?", "m.minute <= ?");
+        params.push(range.startMinute, range.endMinute);
+      }
+      if (sourceIP) {
+        conditions.push("m.source_ip = ?");
+        params.push(sourceIP);
+      }
+      if (sourceChain) {
+        conditions.push("(m.chain = ? OR m.chain LIKE ?)");
+        params.push(sourceChain, `${sourceChain} > %`);
+      }
+
       const stmt = this.db.prepare(`
         SELECT
           m.ip,
@@ -2137,48 +2256,119 @@ export class StatsDatabase {
               json(i.geoip)
             ELSE
               NULL
-          END as geoIP,
-          GROUP_CONCAT(DISTINCT m.chain) as chains
-        FROM minute_dim_stats m
+	          END as geoIP,
+	          GROUP_CONCAT(DISTINCT m.chain) as chains,
+          GROUP_CONCAT(DISTINCT m.rule) as rules
+	        FROM minute_dim_stats m
         LEFT JOIN ip_stats i ON m.backend_id = i.backend_id AND m.ip = i.ip
         LEFT JOIN geoip_cache g ON m.ip = g.ip
-        WHERE m.backend_id = ? AND m.minute >= ? AND m.minute <= ? AND m.domain = ? AND m.ip != ''
+        WHERE ${conditions.join(" AND ")}
         GROUP BY m.ip
         ORDER BY (SUM(m.upload) + SUM(m.download)) DESC
         LIMIT ?
       `);
-      const rows = stmt.all(
-        backendId,
-        range.startMinute,
-        range.endMinute,
-        domain,
-        limit,
-      ) as Array<{
+      const rows = stmt.all(...params, limit) as Array<{
         ip: string;
         domains: string;
         totalUpload: number;
         totalDownload: number;
         totalConnections: number;
         lastSeen: string;
-        asn: string | null;
-        geoIP: string | null;
-        chains: string | null;
-      }>;
+	        asn: string | null;
+	        geoIP: string | null;
+	        chains: string | null;
+          rules: string | null;
+	      }>;
 
-      return rows.map(row => ({
-        ...row,
-        domains: row.domains ? row.domains.split(',').filter(Boolean) : [],
-        geoIP: row.geoIP ? JSON.parse(row.geoIP).filter(Boolean) : undefined,
-        asn: row.asn || undefined,
-        chains: row.chains ? row.chains.split(',').filter(Boolean) : [],
-      })) as IPStats[];
-    }
+	      return rows.map(row => {
+          const rules = row.rules ? row.rules.split(',').filter(Boolean) : [];
+          const chains = row.chains ? row.chains.split(',').filter(Boolean) : [];
+          return {
+            ...row,
+            domains: row.domains ? row.domains.split(',').filter(Boolean) : [],
+            geoIP: row.geoIP ? JSON.parse(row.geoIP).filter(Boolean) : undefined,
+            asn: row.asn || undefined,
+            chains: this.expandShortChainsForRules(backendId, chains, rules),
+          };
+        }) as IPStats[];
+	    }
 
     const domainData = this.getDomainByName(backendId, domain);
     if (!domainData || !domainData.ips || domainData.ips.length === 0) {
       return [];
     }
     return this.getIPStatsByIPs(backendId, domainData.ips.slice(0, limit));
+  }
+
+  // Get domain details for a specific IP (supports optional time range and sourceIP filter)
+  getIPDomainDetails(
+    backendId: number,
+    ip: string,
+    start?: string,
+    end?: string,
+    limit = 100,
+    sourceIP?: string,
+    sourceChain?: string,
+  ): DomainStats[] {
+    const range = this.parseMinuteRange(start, end);
+    const conditions = ["backend_id = ?", "ip = ?", "domain != ''"];
+    const params: Array<string | number> = [backendId, ip];
+
+    if (range) {
+      conditions.push("minute >= ?", "minute <= ?");
+      params.push(range.startMinute, range.endMinute);
+    }
+    if (sourceIP) {
+      conditions.push("source_ip = ?");
+      params.push(sourceIP);
+    }
+    if (sourceChain) {
+      conditions.push("(chain = ? OR chain LIKE ?)");
+      params.push(sourceChain, `${sourceChain} > %`);
+    }
+
+    const stmt = this.db.prepare(`
+      SELECT
+        domain,
+        GROUP_CONCAT(DISTINCT ip) as ips,
+        SUM(upload) as totalUpload,
+        SUM(download) as totalDownload,
+        SUM(connections) as totalConnections,
+        MAX(minute) as lastSeen,
+        GROUP_CONCAT(DISTINCT CASE WHEN rule != '' THEN rule END) as rules,
+        GROUP_CONCAT(DISTINCT chain) as chains
+      FROM minute_dim_stats
+      WHERE ${conditions.join(" AND ")}
+      GROUP BY domain
+      ORDER BY (SUM(upload) + SUM(download)) DESC
+      LIMIT ?
+    `);
+
+    const rows = stmt.all(...params, limit) as Array<{
+      domain: string;
+      ips: string | null;
+      totalUpload: number;
+      totalDownload: number;
+      totalConnections: number;
+      lastSeen: string;
+      rules: string | null;
+      chains: string | null;
+    }>;
+
+    return rows.map(row => {
+      const rules = row.rules ? row.rules.split(',').filter(Boolean) : [];
+      const chains = row.chains ? row.chains.split(',').filter(Boolean) : [];
+      return {
+        domain: row.domain,
+        ips: row.ips ? row.ips.split(',').filter(Boolean) : [],
+        totalUpload: row.totalUpload,
+        totalDownload: row.totalDownload,
+        totalConnections: row.totalConnections,
+        lastSeen: row.lastSeen,
+        rules,
+        chains: this.expandShortChainsForRules(backendId, chains, rules),
+      };
+    }) as DomainStats[];
   }
 
   // Get all IP stats for a specific backend
@@ -2206,9 +2396,10 @@ export class StatsDatabase {
               json(i.geoip)
             ELSE
               NULL
-          END as geoIP,
-          GROUP_CONCAT(DISTINCT m.chain) as chains
-        FROM minute_dim_stats m
+	          END as geoIP,
+	          GROUP_CONCAT(DISTINCT m.chain) as chains,
+          GROUP_CONCAT(DISTINCT m.rule) as rules
+	        FROM minute_dim_stats m
         LEFT JOIN ip_stats i ON m.backend_id = i.backend_id AND m.ip = i.ip
         LEFT JOIN geoip_cache g ON m.ip = g.ip
         WHERE m.backend_id = ? AND m.minute >= ? AND m.minute <= ? AND m.ip != ''
@@ -2228,19 +2419,24 @@ export class StatsDatabase {
         totalDownload: number;
         totalConnections: number;
         lastSeen: string;
-        asn: string | null;
-        geoIP: string | null;
-        chains: string | null;
-      }>;
+	        asn: string | null;
+	        geoIP: string | null;
+	        chains: string | null;
+          rules: string | null;
+	      }>;
 
-      return rows.map(row => ({
-        ...row,
-        domains: row.domains ? row.domains.split(',').filter(Boolean) : [],
-        geoIP: row.geoIP ? JSON.parse(row.geoIP).filter(Boolean) : undefined,
-        asn: row.asn || undefined,
-        chains: row.chains ? row.chains.split(',').filter(Boolean) : [],
-      })) as IPStats[];
-    }
+	      return rows.map(row => {
+          const rules = row.rules ? row.rules.split(',').filter(Boolean) : [];
+          const chains = row.chains ? row.chains.split(',').filter(Boolean) : [];
+          return {
+            ...row,
+            domains: row.domains ? row.domains.split(',').filter(Boolean) : [],
+            geoIP: row.geoIP ? JSON.parse(row.geoIP).filter(Boolean) : undefined,
+            asn: row.asn || undefined,
+            chains: this.expandShortChainsForRules(backendId, chains, rules),
+          };
+        }) as IPStats[];
+	    }
 
     const stmt = this.db.prepare(`
       SELECT 
@@ -2696,12 +2892,16 @@ export class StatsDatabase {
         rules: string | null;
         chains: string | null;
       }>;
-      return rows.map(row => ({
-        ...row,
-        ips: row.ips ? row.ips.split(',').filter(Boolean) : [],
-        rules: row.rules ? row.rules.split(',').filter(Boolean) : [],
-        chains: row.chains ? row.chains.split(',').filter(Boolean) : [],
-      })) as DomainStats[];
+      return rows.map(row => {
+        const rules = row.rules ? row.rules.split(',').filter(Boolean) : [];
+        const chains = row.chains ? row.chains.split(',').filter(Boolean) : [];
+        return {
+          ...row,
+          ips: row.ips ? row.ips.split(',').filter(Boolean) : [],
+          rules,
+          chains: this.expandShortChainsForRules(backendId, chains, rules),
+        };
+      }) as DomainStats[];
     }
 
     const stmt = this.db.prepare(`
@@ -2759,7 +2959,8 @@ export class StatsDatabase {
             ELSE
               NULL
           END as geoIP,
-          GROUP_CONCAT(DISTINCT m.chain) as chains
+	          GROUP_CONCAT(DISTINCT m.chain) as chains,
+          GROUP_CONCAT(DISTINCT m.rule) as rules
         FROM minute_dim_stats m
         LEFT JOIN ip_stats i ON m.backend_id = i.backend_id AND m.ip = i.ip
         LEFT JOIN geoip_cache g ON m.ip = g.ip
@@ -2780,19 +2981,24 @@ export class StatsDatabase {
         totalDownload: number;
         totalConnections: number;
         lastSeen: string;
-        domains: string | null;
-        asn: string | null;
-        geoIP: string | null;
-        chains: string | null;
-      }>;
-      return rows.map(row => ({
-        ...row,
-        domains: row.domains ? row.domains.split(',').filter(Boolean) : [],
-        geoIP: row.geoIP ? JSON.parse(row.geoIP).filter(Boolean) : undefined,
-        asn: row.asn || undefined,
-        chains: row.chains ? row.chains.split(',').filter(Boolean) : [],
-      })) as IPStats[];
-    }
+	        domains: string | null;
+	        asn: string | null;
+	        geoIP: string | null;
+	        chains: string | null;
+          rules: string | null;
+	      }>;
+	      return rows.map(row => {
+          const rules = row.rules ? row.rules.split(',').filter(Boolean) : [];
+          const chains = row.chains ? row.chains.split(',').filter(Boolean) : [];
+          return {
+            ...row,
+            domains: row.domains ? row.domains.split(',').filter(Boolean) : [],
+            geoIP: row.geoIP ? JSON.parse(row.geoIP).filter(Boolean) : undefined,
+            asn: row.asn || undefined,
+            chains: this.expandShortChainsForRules(backendId, chains, rules),
+          };
+        }) as IPStats[];
+	    }
 
     const stmt = this.db.prepare(`
       SELECT 
@@ -2928,12 +3134,16 @@ export class StatsDatabase {
         chains: string | null;
       }>;
 
-      const data = rows.map(row => ({
-        ...row,
-        ips: row.ips ? row.ips.split(',').filter(Boolean) : [],
-        rules: row.rules ? row.rules.split(',').filter(Boolean) : [],
-        chains: row.chains ? row.chains.split(',').filter(Boolean) : [],
-      })) as DomainStats[];
+      const data = rows.map(row => {
+        const rules = row.rules ? row.rules.split(',').filter(Boolean) : [];
+        const chains = row.chains ? row.chains.split(',').filter(Boolean) : [];
+        return {
+          ...row,
+          ips: row.ips ? row.ips.split(',').filter(Boolean) : [],
+          rules,
+          chains: this.expandShortChainsForRules(backendId, chains, rules),
+        };
+      }) as DomainStats[];
 
       return { data, total };
     }
@@ -2969,12 +3179,16 @@ export class StatsDatabase {
       chains: string | null;
     }>;
 
-    const data = rows.map(row => ({
-      ...row,
-      ips: row.ips ? row.ips.split(',') : [],
-      rules: row.rules ? row.rules.split(',') : [],
-      chains: row.chains ? row.chains.split(',') : [],
-    })) as DomainStats[];
+    const data = rows.map(row => {
+      const rules = row.rules ? row.rules.split(',').filter(Boolean) : [];
+      const chains = row.chains ? row.chains.split(',').filter(Boolean) : [];
+      return {
+        ...row,
+        ips: row.ips ? row.ips.split(',') : [],
+        rules,
+        chains: this.expandShortChainsForRules(backendId, chains, rules),
+      };
+    }) as DomainStats[];
 
     return { data, total };
   }
@@ -3042,6 +3256,7 @@ export class StatsDatabase {
           SELECT
             ip,
             GROUP_CONCAT(DISTINCT CASE WHEN domain != '' THEN domain END) as domains,
+            GROUP_CONCAT(DISTINCT rule) as rules,
             SUM(upload) as totalUpload,
             SUM(download) as totalDownload,
             SUM(connections) as totalConnections,
@@ -3054,6 +3269,7 @@ export class StatsDatabase {
         SELECT
           agg.ip,
           agg.domains,
+          agg.rules,
           agg.totalUpload,
           agg.totalDownload,
           agg.totalConnections,
@@ -3088,6 +3304,7 @@ export class StatsDatabase {
       ) as Array<{
         ip: string;
         domains: string;
+        rules: string | null;
         totalUpload: number;
         totalDownload: number;
         totalConnections: number;
@@ -3097,13 +3314,21 @@ export class StatsDatabase {
         chains: string | null;
       }>;
 
-      const data = rows.map(row => ({
-        ...row,
-        domains: row.domains ? row.domains.split(',').filter(Boolean) : [],
-        geoIP: row.geoIP ? JSON.parse(row.geoIP).filter(Boolean) : undefined,
-        asn: row.asn || undefined,
-        chains: row.chains ? row.chains.split(',').filter(Boolean) : [],
-      })) as IPStats[];
+      const data = rows.map(row => {
+        const rules = row.rules ? row.rules.split(',').filter(Boolean) : [];
+        const chains = row.chains ? row.chains.split(',').filter(Boolean) : [];
+        return {
+          ip: row.ip,
+          domains: row.domains ? row.domains.split(',').filter(Boolean) : [],
+          totalUpload: row.totalUpload,
+          totalDownload: row.totalDownload,
+          totalConnections: row.totalConnections,
+          lastSeen: row.lastSeen,
+          geoIP: row.geoIP ? JSON.parse(row.geoIP).filter(Boolean) : undefined,
+          asn: row.asn || undefined,
+          chains: this.expandShortChainsForRules(backendId, chains, rules),
+        };
+      }) as IPStats[];
 
       return { data, total };
     }
@@ -3128,6 +3353,7 @@ export class StatsDatabase {
         i.total_download as totalDownload,
         i.total_connections as totalConnections,
         i.last_seen as lastSeen,
+        i.rules,
         COALESCE(i.asn, g.asn) as asn,
         CASE
           WHEN g.country IS NOT NULL THEN
@@ -3156,18 +3382,27 @@ export class StatsDatabase {
       totalDownload: number;
       totalConnections: number;
       lastSeen: string;
+      rules: string | null;
       asn: string | null;
       geoIP: string | null;
       chains: string | null;
     }>;
 
-    const data = rows.map(row => ({
-      ...row,
-      domains: row.domains ? row.domains.split(',') : [],
-      geoIP: row.geoIP ? JSON.parse(row.geoIP).filter(Boolean) : undefined,
-      asn: row.asn || undefined,
-      chains: row.chains ? row.chains.split(',') : [],
-    })) as IPStats[];
+    const data = rows.map(row => {
+      const rules = row.rules ? row.rules.split(',').filter(Boolean) : [];
+      const chains = row.chains ? row.chains.split(',').filter(Boolean) : [];
+      return {
+        ip: row.ip,
+        domains: row.domains ? row.domains.split(',') : [],
+        totalUpload: row.totalUpload,
+        totalDownload: row.totalDownload,
+        totalConnections: row.totalConnections,
+        lastSeen: row.lastSeen,
+        geoIP: row.geoIP ? JSON.parse(row.geoIP).filter(Boolean) : undefined,
+        asn: row.asn || undefined,
+        chains: this.expandShortChainsForRules(backendId, chains, rules),
+      };
+    }) as IPStats[];
 
     return { data, total };
   }
@@ -3188,11 +3423,12 @@ export class StatsDatabase {
         GROUP BY chain
         ORDER BY (SUM(upload) + SUM(download)) DESC
       `);
-      return stmt.all(
+      const rows = stmt.all(
         backendId,
         range.startMinute,
         range.endMinute,
       ) as ProxyStats[];
+      return this.aggregateProxyStatsByFirstHop(rows);
     }
 
     const stmt = this.db.prepare(`
@@ -3202,7 +3438,8 @@ export class StatsDatabase {
       WHERE backend_id = ?
       ORDER BY (total_upload + total_download) DESC
     `);
-    return stmt.all(backendId) as ProxyStats[];
+    const rows = stmt.all(backendId) as ProxyStats[];
+    return this.aggregateProxyStatsByFirstHop(rows);
   }
 
   // Get rule stats for a specific backend
@@ -3440,9 +3677,26 @@ export class StatsDatabase {
     domain: string,
     start?: string,
     end?: string,
+    sourceIP?: string,
+    sourceChain?: string,
   ): ProxyTrafficStats[] {
     const range = this.parseMinuteRange(start, end);
-    if (range) {
+    if (range || sourceIP || sourceChain) {
+      const conditions = ["backend_id = ?", "domain = ?"];
+      const params: Array<string | number> = [backendId, domain];
+      if (range) {
+        conditions.push("minute >= ?", "minute <= ?");
+        params.push(range.startMinute, range.endMinute);
+      }
+      if (sourceIP) {
+        conditions.push("source_ip = ?");
+        params.push(sourceIP);
+      }
+      if (sourceChain) {
+        conditions.push("(chain = ? OR chain LIKE ?)");
+        params.push(sourceChain, `${sourceChain} > %`);
+      }
+
       const stmt = this.db.prepare(`
         SELECT
           chain,
@@ -3450,16 +3704,11 @@ export class StatsDatabase {
           SUM(download) as totalDownload,
           SUM(connections) as totalConnections
         FROM minute_dim_stats
-        WHERE backend_id = ? AND minute >= ? AND minute <= ? AND domain = ?
+        WHERE ${conditions.join(" AND ")}
         GROUP BY chain
         ORDER BY (SUM(upload) + SUM(download)) DESC
       `);
-      return stmt.all(
-        backendId,
-        range.startMinute,
-        range.endMinute,
-        domain,
-      ) as ProxyTrafficStats[];
+      return stmt.all(...params) as ProxyTrafficStats[];
     }
 
     const stmt = this.db.prepare(`
@@ -3480,9 +3729,26 @@ export class StatsDatabase {
     ip: string,
     start?: string,
     end?: string,
+    sourceIP?: string,
+    sourceChain?: string,
   ): ProxyTrafficStats[] {
     const range = this.parseMinuteRange(start, end);
-    if (range) {
+    if (range || sourceIP || sourceChain) {
+      const conditions = ["backend_id = ?", "ip = ?"];
+      const params: Array<string | number> = [backendId, ip];
+      if (range) {
+        conditions.push("minute >= ?", "minute <= ?");
+        params.push(range.startMinute, range.endMinute);
+      }
+      if (sourceIP) {
+        conditions.push("source_ip = ?");
+        params.push(sourceIP);
+      }
+      if (sourceChain) {
+        conditions.push("(chain = ? OR chain LIKE ?)");
+        params.push(sourceChain, `${sourceChain} > %`);
+      }
+
       const stmt = this.db.prepare(`
         SELECT
           chain,
@@ -3490,16 +3756,11 @@ export class StatsDatabase {
           SUM(download) as totalDownload,
           SUM(connections) as totalConnections
         FROM minute_dim_stats
-        WHERE backend_id = ? AND minute >= ? AND minute <= ? AND ip = ?
+        WHERE ${conditions.join(" AND ")}
         GROUP BY chain
         ORDER BY (SUM(upload) + SUM(download)) DESC
       `);
-      return stmt.all(
-        backendId,
-        range.startMinute,
-        range.endMinute,
-        ip,
-      ) as ProxyTrafficStats[];
+      return stmt.all(...params) as ProxyTrafficStats[];
     }
 
     const stmt = this.db.prepare(`
@@ -3533,7 +3794,7 @@ export class StatsDatabase {
           MAX(minute) as lastSeen,
           GROUP_CONCAT(DISTINCT ip) as ips
         FROM minute_dim_stats
-        WHERE backend_id = ? AND minute >= ? AND minute <= ? AND chain = ? AND domain != ''
+        WHERE backend_id = ? AND minute >= ? AND minute <= ? AND (chain = ? OR chain LIKE ?) AND domain != ''
         GROUP BY domain
         ORDER BY (SUM(upload) + SUM(download)) DESC
         LIMIT ?
@@ -3543,6 +3804,7 @@ export class StatsDatabase {
         range.startMinute,
         range.endMinute,
         chain,
+        `${chain} > %`,
         limit,
       ) as Array<{
         domain: string;
@@ -3571,11 +3833,11 @@ export class StatsDatabase {
         ds.ips
       FROM domain_proxy_stats dps
       LEFT JOIN domain_stats ds ON dps.backend_id = ds.backend_id AND dps.domain = ds.domain
-      WHERE dps.backend_id = ? AND dps.chain = ?
+      WHERE dps.backend_id = ? AND (dps.chain = ? OR dps.chain LIKE ?)
       ORDER BY (dps.total_upload + dps.total_download) DESC
       LIMIT ?
     `);
-    const rows = stmt.all(backendId, chain, limit) as Array<{
+    const rows = stmt.all(backendId, chain, `${chain} > %`, limit) as Array<{
       domain: string;
       totalUpload: number;
       totalDownload: number;
@@ -3627,7 +3889,7 @@ export class StatsDatabase {
         FROM minute_dim_stats m
         LEFT JOIN ip_stats i ON m.backend_id = i.backend_id AND m.ip = i.ip
         LEFT JOIN geoip_cache g ON m.ip = g.ip
-        WHERE m.backend_id = ? AND m.minute >= ? AND m.minute <= ? AND m.chain = ? AND m.ip != ''
+        WHERE m.backend_id = ? AND m.minute >= ? AND m.minute <= ? AND (m.chain = ? OR m.chain LIKE ?) AND m.ip != ''
         GROUP BY m.ip
         ORDER BY (SUM(m.upload) + SUM(m.download)) DESC
         LIMIT ?
@@ -3637,6 +3899,7 @@ export class StatsDatabase {
         range.startMinute,
         range.endMinute,
         chain,
+        `${chain} > %`,
         limit,
       ) as Array<{
         ip: string;
@@ -3667,11 +3930,11 @@ export class StatsDatabase {
         ips.last_seen as lastSeen,
         ips.domains
       FROM ip_proxy_stats ips
-      WHERE ips.backend_id = ? AND ips.chain = ? AND ips.ip != ''
+      WHERE ips.backend_id = ? AND (ips.chain = ? OR ips.chain LIKE ?) AND ips.ip != ''
       ORDER BY (ips.total_upload + ips.total_download) DESC
       LIMIT ?
     `);
-    const rows = stmt.all(backendId, chain, limit) as Array<{
+    const rows = stmt.all(backendId, chain, `${chain} > %`, limit) as Array<{
       ip: string;
       totalUpload: number;
       totalDownload: number;
@@ -3760,16 +4023,19 @@ export class StatsDatabase {
         chains: string | null;
       }>;
 
-      return rows.map(row => ({
-        domain: row.domain,
-        totalUpload: row.totalUpload,
-        totalDownload: row.totalDownload,
-        totalConnections: row.totalConnections,
-        lastSeen: row.lastSeen,
-        ips: row.ips ? row.ips.split(',').filter(Boolean) : [],
-        chains: row.chains ? row.chains.split(',').filter(Boolean) : [],
-        rules: [rule],
-      })) as DomainStats[];
+      return rows.map(row => {
+        const chains = row.chains ? row.chains.split(',').filter(Boolean) : [];
+        return {
+          domain: row.domain,
+          totalUpload: row.totalUpload,
+          totalDownload: row.totalDownload,
+          totalConnections: row.totalConnections,
+          lastSeen: row.lastSeen,
+          ips: row.ips ? row.ips.split(',').filter(Boolean) : [],
+          chains: this.expandShortChainsForRules(backendId, chains, [rule]),
+          rules: [rule],
+        };
+      }) as DomainStats[];
     }
 
     // Query rule_domain_traffic for accurate all-time per-rule domain traffic
@@ -3806,7 +4072,11 @@ export class StatsDatabase {
       totalConnections: row.totalConnections,
       lastSeen: row.lastSeen,
       ips: row.ips ? row.ips.split(',').filter(Boolean) : [],
-      chains: row.chains ? row.chains.split(',').filter(Boolean) : [],
+      chains: this.expandShortChainsForRules(
+        backendId,
+        row.chains ? row.chains.split(',').filter(Boolean) : [],
+        [rule],
+      ),
       rules: [rule],
     })) as DomainStats[];
   }
@@ -3871,17 +4141,20 @@ export class StatsDatabase {
         geoIPData: string | null;
       }>;
 
-      return rows.map(row => ({
-        ip: row.ip,
-        totalUpload: row.totalUpload,
-        totalDownload: row.totalDownload,
-        totalConnections: row.totalConnections,
-        lastSeen: row.lastSeen,
-        domains: row.domains ? row.domains.split(',').filter(Boolean) : [],
-        chains: row.chains ? row.chains.split(',').filter(Boolean) : [],
-        asn: row.asn || undefined,
-        geoIP: row.geoIPData ? JSON.parse(row.geoIPData).filter(Boolean) : undefined,
-      })) as IPStats[];
+      return rows.map(row => {
+        const chains = row.chains ? row.chains.split(',').filter(Boolean) : [];
+        return {
+          ip: row.ip,
+          totalUpload: row.totalUpload,
+          totalDownload: row.totalDownload,
+          totalConnections: row.totalConnections,
+          lastSeen: row.lastSeen,
+          domains: row.domains ? row.domains.split(',').filter(Boolean) : [],
+          chains: this.expandShortChainsForRules(backendId, chains, [rule]),
+          asn: row.asn || undefined,
+          geoIP: row.geoIPData ? JSON.parse(row.geoIPData).filter(Boolean) : undefined,
+        };
+      }) as IPStats[];
     }
 
     // Query rule_ip_traffic for accurate all-time per-rule IP traffic
@@ -3933,10 +4206,216 @@ export class StatsDatabase {
       totalConnections: row.totalConnections,
       lastSeen: row.lastSeen,
       domains: row.domains ? row.domains.split(',').filter(Boolean) : [],
-      chains: row.chains ? row.chains.split(',').filter(Boolean) : [],
+      chains: this.expandShortChainsForRules(
+        backendId,
+        row.chains ? row.chains.split(',').filter(Boolean) : [],
+        [rule],
+      ),
       asn: row.asn || undefined,
       geoIP: row.geoIPData ? JSON.parse(row.geoIPData).filter(Boolean) : undefined,
     })) as IPStats[];
+  }
+
+  // Get per-proxy traffic breakdown for a specific domain under a specific rule
+  getRuleDomainProxyStats(
+    backendId: number,
+    rule: string,
+    domain: string,
+    start?: string,
+    end?: string,
+  ): ProxyTrafficStats[] {
+    const range = this.parseMinuteRange(start, end);
+    if (range) {
+      const stmt = this.db.prepare(`
+        SELECT
+          chain,
+          SUM(upload) as totalUpload,
+          SUM(download) as totalDownload,
+          SUM(connections) as totalConnections
+        FROM minute_dim_stats
+        WHERE backend_id = ? AND minute >= ? AND minute <= ? AND rule = ? AND domain = ?
+        GROUP BY chain
+        ORDER BY (SUM(upload) + SUM(download)) DESC
+      `);
+      return stmt.all(
+        backendId,
+        range.startMinute,
+        range.endMinute,
+        rule,
+        domain,
+      ) as ProxyTrafficStats[];
+    }
+
+    return [];
+  }
+
+  // Get IP details for a specific domain under a specific rule
+  getRuleDomainIPDetails(
+    backendId: number,
+    rule: string,
+    domain: string,
+    start?: string,
+    end?: string,
+    limit = 100,
+  ): IPStats[] {
+    const range = this.parseMinuteRange(start, end);
+    const conditions = ["m.backend_id = ?", "m.rule = ?", "m.domain = ?", "m.ip != ''"];
+    const params: Array<string | number> = [backendId, rule, domain];
+
+    if (range) {
+      conditions.push("m.minute >= ?", "m.minute <= ?");
+      params.push(range.startMinute, range.endMinute);
+    }
+
+    const stmt = this.db.prepare(`
+      SELECT
+        m.ip,
+        GROUP_CONCAT(DISTINCT CASE WHEN m.domain != '' THEN m.domain END) as domains,
+        SUM(m.upload) as totalUpload,
+        SUM(m.download) as totalDownload,
+        SUM(m.connections) as totalConnections,
+        MAX(m.minute) as lastSeen,
+        COALESCE(i.asn, g.asn) as asn,
+        CASE
+          WHEN g.country IS NOT NULL THEN
+            json_array(
+              g.country,
+              COALESCE(g.country_name, g.country),
+              COALESCE(g.city, ''),
+              COALESCE(g.as_name, '')
+            )
+          WHEN i.geoip IS NOT NULL THEN
+            json(i.geoip)
+          ELSE
+            NULL
+        END as geoIP,
+        GROUP_CONCAT(DISTINCT m.chain) as chains
+      FROM minute_dim_stats m
+      LEFT JOIN ip_stats i ON m.backend_id = i.backend_id AND m.ip = i.ip
+      LEFT JOIN geoip_cache g ON m.ip = g.ip
+      WHERE ${conditions.join(" AND ")}
+      GROUP BY m.ip
+      ORDER BY (SUM(m.upload) + SUM(m.download)) DESC
+      LIMIT ?
+    `);
+
+    const rows = stmt.all(...params, limit) as Array<{
+      ip: string;
+      domains: string;
+      totalUpload: number;
+      totalDownload: number;
+      totalConnections: number;
+      lastSeen: string;
+      asn: string | null;
+      geoIP: string | null;
+      chains: string | null;
+    }>;
+
+    return rows.map(row => {
+      const chains = row.chains ? row.chains.split(',').filter(Boolean) : [];
+      return {
+        ...row,
+        domains: row.domains ? row.domains.split(',').filter(Boolean) : [],
+        geoIP: row.geoIP ? JSON.parse(row.geoIP).filter(Boolean) : undefined,
+        asn: row.asn || undefined,
+        chains: this.expandShortChainsForRules(backendId, chains, [rule]),
+      };
+    }) as IPStats[];
+  }
+
+  // Get per-proxy traffic breakdown for a specific IP under a specific rule
+  getRuleIPProxyStats(
+    backendId: number,
+    rule: string,
+    ip: string,
+    start?: string,
+    end?: string,
+  ): ProxyTrafficStats[] {
+    const range = this.parseMinuteRange(start, end);
+    if (range) {
+      const stmt = this.db.prepare(`
+        SELECT
+          chain,
+          SUM(upload) as totalUpload,
+          SUM(download) as totalDownload,
+          SUM(connections) as totalConnections
+        FROM minute_dim_stats
+        WHERE backend_id = ? AND minute >= ? AND minute <= ? AND rule = ? AND ip = ?
+        GROUP BY chain
+        ORDER BY (SUM(upload) + SUM(download)) DESC
+      `);
+      return stmt.all(
+        backendId,
+        range.startMinute,
+        range.endMinute,
+        rule,
+        ip,
+      ) as ProxyTrafficStats[];
+    }
+
+    return [];
+  }
+
+  // Get domain details for a specific IP under a specific rule
+  getRuleIPDomainDetails(
+    backendId: number,
+    rule: string,
+    ip: string,
+    start?: string,
+    end?: string,
+    limit = 100,
+  ): DomainStats[] {
+    const range = this.parseMinuteRange(start, end);
+    const conditions = ["backend_id = ?", "rule = ?", "ip = ?", "domain != ''"];
+    const params: Array<string | number> = [backendId, rule, ip];
+
+    if (range) {
+      conditions.push("minute >= ?", "minute <= ?");
+      params.push(range.startMinute, range.endMinute);
+    }
+
+    const stmt = this.db.prepare(`
+      SELECT
+        domain,
+        GROUP_CONCAT(DISTINCT ip) as ips,
+        SUM(upload) as totalUpload,
+        SUM(download) as totalDownload,
+        SUM(connections) as totalConnections,
+        MAX(minute) as lastSeen,
+        GROUP_CONCAT(DISTINCT CASE WHEN rule != '' THEN rule END) as rules,
+        GROUP_CONCAT(DISTINCT chain) as chains
+      FROM minute_dim_stats
+      WHERE ${conditions.join(" AND ")}
+      GROUP BY domain
+      ORDER BY (SUM(upload) + SUM(download)) DESC
+      LIMIT ?
+    `);
+
+    const rows = stmt.all(...params, limit) as Array<{
+      domain: string;
+      ips: string | null;
+      totalUpload: number;
+      totalDownload: number;
+      totalConnections: number;
+      lastSeen: string;
+      rules: string | null;
+      chains: string | null;
+    }>;
+
+    return rows.map(row => {
+      const rules = row.rules ? row.rules.split(',').filter(Boolean) : [];
+      const chains = row.chains ? row.chains.split(',').filter(Boolean) : [];
+      return {
+        domain: row.domain,
+        ips: row.ips ? row.ips.split(',').filter(Boolean) : [],
+        totalUpload: row.totalUpload,
+        totalDownload: row.totalDownload,
+        totalConnections: row.totalConnections,
+        lastSeen: row.lastSeen,
+        rules,
+        chains: this.expandShortChainsForRules(backendId, chains, rules),
+      };
+    }) as DomainStats[];
   }
 
   // Get rule chain flow for visualization

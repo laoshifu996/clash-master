@@ -291,12 +291,23 @@ export class APIServer {
         return reply.status(404).send({ error: 'No backend specified or active' });
       }
 
-      const { domain } = request.query as { domain?: string };
+      const { domain, sourceIP, sourceChain } = request.query as {
+        domain?: string;
+        sourceIP?: string;
+        sourceChain?: string;
+      };
       if (!domain) {
         return reply.status(400).send({ error: 'Domain parameter is required' });
       }
 
-      return this.db.getDomainProxyStats(backendId, domain, timeRange.start, timeRange.end);
+      return this.db.getDomainProxyStats(
+        backendId,
+        domain,
+        timeRange.start,
+        timeRange.end,
+        sourceIP,
+        sourceChain,
+      );
     });
 
     // Get IP details for a specific domain (includes geoIP and traffic)
@@ -312,7 +323,11 @@ export class APIServer {
         return reply.status(404).send({ error: 'No backend specified or active' });
       }
 
-      const { domain } = request.query as { domain?: string };
+      const { domain, sourceIP, sourceChain } = request.query as {
+        domain?: string;
+        sourceIP?: string;
+        sourceChain?: string;
+      };
       if (!domain) {
         return reply.status(400).send({ error: 'Domain parameter is required' });
       }
@@ -322,6 +337,9 @@ export class APIServer {
         domain,
         timeRange.start,
         timeRange.end,
+        100,
+        sourceIP,
+        sourceChain,
       );
     });
 
@@ -338,12 +356,58 @@ export class APIServer {
         return reply.status(404).send({ error: 'No backend specified or active' });
       }
 
-      const { ip } = request.query as { ip?: string };
+      const { ip, sourceIP, sourceChain } = request.query as {
+        ip?: string;
+        sourceIP?: string;
+        sourceChain?: string;
+      };
       if (!ip) {
         return reply.status(400).send({ error: 'IP parameter is required' });
       }
 
-      return this.db.getIPProxyStats(backendId, ip, timeRange.start, timeRange.end);
+      return this.db.getIPProxyStats(
+        backendId,
+        ip,
+        timeRange.start,
+        timeRange.end,
+        sourceIP,
+        sourceChain,
+      );
+    });
+
+    // Get domain details for a specific IP (includes traffic and proxy chains)
+    app.get('/api/stats/ips/domain-details', async (request, reply) => {
+      const backendId = getBackendId(request);
+      const timeRange = getTimeRange(request, reply);
+
+      if (timeRange === null) {
+        return;
+      }
+
+      if (backendId === null) {
+        return reply.status(404).send({ error: 'No backend specified or active' });
+      }
+
+      const { ip, sourceIP, sourceChain, limit } = request.query as {
+        ip?: string;
+        sourceIP?: string;
+        sourceChain?: string;
+        limit?: string;
+      };
+      if (!ip) {
+        return reply.status(400).send({ error: 'IP parameter is required' });
+      }
+
+      const effectiveLimit = parseLimit(limit, 100, 2000);
+      return this.db.getIPDomainDetails(
+        backendId,
+        ip,
+        timeRange.start,
+        timeRange.end,
+        effectiveLimit,
+        sourceIP,
+        sourceChain,
+      );
     });
 
     // Get domains for a specific proxy/chain
@@ -491,6 +555,126 @@ export class APIServer {
         effectiveLimit,
         timeRange.start,
         timeRange.end,
+      );
+    });
+
+    // Get per-proxy traffic breakdown for a specific domain under a specific rule
+    app.get('/api/stats/rules/domains/proxy-stats', async (request, reply) => {
+      const backendId = getBackendId(request);
+      const timeRange = getTimeRange(request, reply);
+
+      if (timeRange === null) {
+        return;
+      }
+
+      if (backendId === null) {
+        return reply.status(404).send({ error: 'No backend specified or active' });
+      }
+
+      const { rule, domain } = request.query as { rule?: string; domain?: string };
+      if (!rule || !domain) {
+        return reply.status(400).send({ error: 'Rule and domain parameters are required' });
+      }
+
+      return this.db.getRuleDomainProxyStats(
+        backendId,
+        rule,
+        domain,
+        timeRange.start,
+        timeRange.end,
+      );
+    });
+
+    // Get IP details for a specific domain under a specific rule
+    app.get('/api/stats/rules/domains/ip-details', async (request, reply) => {
+      const backendId = getBackendId(request);
+      const timeRange = getTimeRange(request, reply);
+
+      if (timeRange === null) {
+        return;
+      }
+
+      if (backendId === null) {
+        return reply.status(404).send({ error: 'No backend specified or active' });
+      }
+
+      const { rule, domain, limit } = request.query as {
+        rule?: string;
+        domain?: string;
+        limit?: string;
+      };
+      if (!rule || !domain) {
+        return reply.status(400).send({ error: 'Rule and domain parameters are required' });
+      }
+      const effectiveLimit = parseLimit(limit, 100, 2000);
+
+      return this.db.getRuleDomainIPDetails(
+        backendId,
+        rule,
+        domain,
+        timeRange.start,
+        timeRange.end,
+        effectiveLimit,
+      );
+    });
+
+    // Get per-proxy traffic breakdown for a specific IP under a specific rule
+    app.get('/api/stats/rules/ips/proxy-stats', async (request, reply) => {
+      const backendId = getBackendId(request);
+      const timeRange = getTimeRange(request, reply);
+
+      if (timeRange === null) {
+        return;
+      }
+
+      if (backendId === null) {
+        return reply.status(404).send({ error: 'No backend specified or active' });
+      }
+
+      const { rule, ip } = request.query as { rule?: string; ip?: string };
+      if (!rule || !ip) {
+        return reply.status(400).send({ error: 'Rule and IP parameters are required' });
+      }
+
+      return this.db.getRuleIPProxyStats(
+        backendId,
+        rule,
+        ip,
+        timeRange.start,
+        timeRange.end,
+      );
+    });
+
+    // Get domain details for a specific IP under a specific rule
+    app.get('/api/stats/rules/ips/domain-details', async (request, reply) => {
+      const backendId = getBackendId(request);
+      const timeRange = getTimeRange(request, reply);
+
+      if (timeRange === null) {
+        return;
+      }
+
+      if (backendId === null) {
+        return reply.status(404).send({ error: 'No backend specified or active' });
+      }
+
+      const { rule, ip, limit } = request.query as {
+        rule?: string;
+        ip?: string;
+        limit?: string;
+      };
+      if (!rule || !ip) {
+        return reply.status(400).send({ error: 'Rule and IP parameters are required' });
+      }
+      const effectiveLimit = parseLimit(limit, 100, 2000);
+
+      return this.db.getRuleIPDomainDetails(
+        backendId,
+        rule,
+        ip,
+        timeRange.start,
+        timeRange.end,
+        effectiveLimit,
       );
     });
 

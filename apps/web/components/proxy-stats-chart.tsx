@@ -28,7 +28,12 @@ const COLORS = [
 // Format proxy name for display
 function formatProxyName(name: string): string {
   if (!name) return "DIRECT";
-  return name.replace(/^\["?/, "").replace(/"?\]$/, "").trim();
+  const normalized = name.replace(/^\["?/, "").replace(/"?\]$/, "").trim();
+  const parts = normalized
+    .split(">")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parts[0] || normalized;
 }
 
 export function ProxyStatsChart({ data }: ProxyStatsChartProps) {

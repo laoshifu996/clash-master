@@ -14,7 +14,6 @@ import {
   ChevronDown,
   ChevronUp,
   Link2,
-  Waypoints,
   Loader2,
 } from "lucide-react";
 import { useTranslations } from "next-intl";
@@ -23,7 +22,9 @@ import { Button } from "@/components/ui/button";
 import { CountryFlag } from "@/components/country-flag";
 import { formatBytes, formatNumber } from "@/lib/utils";
 import { cn } from "@/lib/utils";
-import type { IPStats, ProxyTrafficStats } from "@clashmaster/shared";
+import { IPExpandedDetails } from "@/components/stats-tables/expanded-details";
+import { ProxyChainBadge } from "@/components/proxy-chain-badge";
+import type { DomainStats, IPStats, ProxyTrafficStats } from "@clashmaster/shared";
 import { api, type TimeRange } from "@/lib/api";
 import {
   DropdownMenu,
@@ -31,12 +32,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 
 interface IPsTableProps {
   activeBackendId?: number;
@@ -75,15 +70,6 @@ const getIPColor = (ip: string) => {
   return IP_COLORS[Math.abs(hash) % IP_COLORS.length];
 };
 
-// Get color for domain
-const getDomainColor = (domain: string) => {
-  let hash = 0;
-  for (let i = 0; i < domain.length; i++) {
-    hash = domain.charCodeAt(i) + ((hash << 5) - hash);
-  }
-  return IP_COLORS[Math.abs(hash) % IP_COLORS.length];
-};
-
 export function IPsTable({ activeBackendId, timeRange }: IPsTableProps) {
   const t = useTranslations("ips");
   const [data, setData] = useState<IPStats[]>([]);
@@ -100,6 +86,12 @@ export function IPsTable({ activeBackendId, timeRange }: IPsTableProps) {
     Record<string, ProxyTrafficStats[]>
   >({});
   const [proxyStatsLoading, setProxyStatsLoading] = useState<string | null>(
+    null,
+  );
+  const [domainDetails, setDomainDetails] = useState<
+    Record<string, DomainStats[]>
+  >({});
+  const [domainDetailsLoading, setDomainDetailsLoading] = useState<string | null>(
     null,
   );
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -159,15 +151,22 @@ export function IPsTable({ activeBackendId, timeRange }: IPsTableProps) {
   ]);
 
   useEffect(() => {
+    // Backend switch means a different data universe, collapse safely.
     setExpandedIP(null);
     setProxyStats({});
-  }, [activeBackendId, timeRange]);
+    setDomainDetails({});
+  }, [activeBackendId]);
 
   // Fetch proxy stats when an IP is expanded
   const fetchProxyStats = useCallback(
-    async (ip: string) => {
-      if (proxyStats[ip]) return;
-      setProxyStatsLoading(ip);
+    async (ip: string, options?: { force?: boolean; background?: boolean }) => {
+      const force = options?.force ?? false;
+      const background = options?.background ?? false;
+      const hasCached = !!proxyStats[ip];
+      if (!force && hasCached) return;
+      if (!background || !hasCached) {
+        setProxyStatsLoading(ip);
+      }
       try {
         const stats = await api.getIPProxyStats(ip, activeBackendId, timeRange);
         setProxyStats((prev) => ({ ...prev, [ip]: stats }));
@@ -175,11 +174,50 @@ export function IPsTable({ activeBackendId, timeRange }: IPsTableProps) {
         console.error(`Failed to fetch proxy stats for ${ip}:`, err);
         setProxyStats((prev) => ({ ...prev, [ip]: [] }));
       } finally {
-        setProxyStatsLoading(null);
+        if (proxyStatsLoading === ip) {
+          setProxyStatsLoading(null);
+        }
       }
     },
-    [proxyStats, activeBackendId, timeRange],
+    [proxyStats, activeBackendId, timeRange, proxyStatsLoading],
   );
+
+  // Fetch domain details (with traffic) when an IP is expanded
+  const fetchDomainDetails = useCallback(
+    async (ip: string, options?: { force?: boolean; background?: boolean }) => {
+      const force = options?.force ?? false;
+      const background = options?.background ?? false;
+      const hasCached = !!domainDetails[ip];
+      if (!force && hasCached) return;
+      if (!background || !hasCached) {
+        setDomainDetailsLoading(ip);
+      }
+      try {
+        const details = await api.getIPDomainDetails(ip, activeBackendId, timeRange);
+        setDomainDetails((prev) => ({ ...prev, [ip]: details }));
+      } catch (err) {
+        console.error(`Failed to fetch domain details for ${ip}:`, err);
+        setDomainDetails((prev) => ({ ...prev, [ip]: [] }));
+      } finally {
+        if (domainDetailsLoading === ip) {
+          setDomainDetailsLoading(null);
+        }
+      }
+    },
+    [domainDetails, activeBackendId, timeRange, domainDetailsLoading],
+  );
+
+  useEffect(() => {
+    if (!expandedIP) return;
+    fetchProxyStats(expandedIP);
+    fetchDomainDetails(expandedIP);
+  }, [expandedIP, fetchProxyStats, fetchDomainDetails]);
+
+  useEffect(() => {
+    if (!expandedIP) return;
+    fetchProxyStats(expandedIP, { force: true, background: true });
+    fetchDomainDetails(expandedIP, { force: true, background: true });
+  }, [timeRange?.start, timeRange?.end, expandedIP, fetchProxyStats, fetchDomainDetails]);
 
   const handleSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -207,6 +245,7 @@ export function IPsTable({ activeBackendId, timeRange }: IPsTableProps) {
     setExpandedIP(newExpanded);
     if (newExpanded) {
       fetchProxyStats(newExpanded);
+      fetchDomainDetails(newExpanded);
     }
   };
 
@@ -279,7 +318,7 @@ export function IPsTable({ activeBackendId, timeRange }: IPsTableProps) {
           <SortIcon column="ip" />
         </div>
         <div className="col-span-2 flex items-center">{t("proxy")}</div>
-        <div className="col-span-1 flex items-center">{t("location")}</div>
+        <div className="col-span-2 flex items-center">{t("location")}</div>
         <div
           className="col-span-2 flex items-center justify-end cursor-pointer hover:text-foreground transition-colors"
           onClick={() => handleSort("totalDownload")}>
@@ -298,7 +337,7 @@ export function IPsTable({ activeBackendId, timeRange }: IPsTableProps) {
           {t("conn")}
           <SortIcon column="totalConnections" />
         </div>
-        <div className="col-span-2 flex items-center justify-end">
+        <div className="col-span-1 flex items-center justify-end">
           {t("domainCount")}
         </div>
       </div>
@@ -345,19 +384,6 @@ export function IPsTable({ activeBackendId, timeRange }: IPsTableProps) {
           data.map((ip, index) => {
             const ipColor = getIPColor(ip.ip);
             const isExpanded = expandedIP === ip.ip;
-            const fullChain =
-              ip.chains && ip.chains.length > 0 ? ip.chains[0] : "";
-            const lastProxy = fullChain
-              ? fullChain.split(" > ").pop()?.trim() || fullChain
-              : "";
-            const chainTooltip =
-              ip.chains && ip.chains.length > 0
-                ? ip.chains
-                    .map((chain, idx) =>
-                      idx === 0 ? chain : `(${idx + 1}) ${chain}`,
-                    )
-                    .join("\n")
-                : "";
 
             return (
               <div key={ip.ip} className="group">
@@ -384,40 +410,15 @@ export function IPsTable({ activeBackendId, timeRange }: IPsTableProps) {
 
                   {/* Proxy */}
                   <div className="col-span-2 flex items-center gap-1.5 min-w-0">
-                    {ip.chains && ip.chains.length > 0 ? (
-                      <TooltipProvider delayDuration={300}>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <span className="inline-flex items-center gap-1.5 min-w-0">
-                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-secondary/60 text-foreground dark:bg-secondary/40 dark:text-foreground/80 text-[11px] font-medium truncate max-w-[120px]">
-                                <Waypoints className="h-2.5 w-2.5 shrink-0" />
-                                {lastProxy}
-                              </span>
-                              {ip.chains.length > 1 && (
-                                <span className="text-[11px] text-muted-foreground shrink-0">
-                                  +{ip.chains.length - 1}
-                                </span>
-                              )}
-                            </span>
-                          </TooltipTrigger>
-                          <TooltipContent
-                            side="top"
-                            className="max-w-[360px] whitespace-pre-wrap">
-                            {chainTooltip}
-                          </TooltipContent>
-                        </Tooltip>
-                      </TooltipProvider>
-                    ) : (
-                      <span className="text-xs text-muted-foreground">-</span>
-                    )}
+                    <ProxyChainBadge chains={ip.chains} />
                   </div>
 
                   {/* Location */}
-                  <div className="col-span-1 flex items-center">
+                  <div className="col-span-2 flex items-center min-w-0">
                     {ip.geoIP && ip.geoIP.length > 0 ? (
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-1.5 min-w-0">
                         <CountryFlag country={ip.geoIP[0]} className="h-3.5 w-5" title={ip.geoIP[1] || ip.geoIP[0]} />
-                        <span className="text-xs truncate">
+                        <span className="text-xs whitespace-nowrap">
                           {ip.geoIP[1] || ip.geoIP[0]}
                         </span>
                       </div>
@@ -448,7 +449,7 @@ export function IPsTable({ activeBackendId, timeRange }: IPsTableProps) {
                   </div>
 
                   {/* Domains Count - Clickable */}
-                  <div className="col-span-2 flex items-center justify-end">
+                  <div className="col-span-1 flex items-center justify-end">
                     <Button
                       variant="ghost"
                       size="sm"
@@ -525,28 +526,7 @@ export function IPsTable({ activeBackendId, timeRange }: IPsTableProps) {
                       </span>
                     )}
                     {ip.chains && ip.chains.length > 0 && (
-                      <TooltipProvider delayDuration={300}>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <span className="inline-flex items-center gap-1.5">
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-secondary/60 text-foreground dark:bg-secondary/40 dark:text-foreground/80 text-[11px] font-medium whitespace-nowrap">
-                                <Waypoints className="h-2.5 w-2.5 shrink-0" />
-                                {lastProxy}
-                              </span>
-                              {ip.chains.length > 1 && (
-                                <span className="text-[11px] text-muted-foreground">
-                                  +{ip.chains.length - 1}
-                                </span>
-                              )}
-                            </span>
-                          </TooltipTrigger>
-                          <TooltipContent
-                            side="top"
-                            className="max-w-[360px] whitespace-pre-wrap">
-                            {chainTooltip}
-                          </TooltipContent>
-                        </Tooltip>
-                      </TooltipProvider>
+                      <ProxyChainBadge chains={ip.chains} truncateLabel={false} />
                     )}
                   </div>
 
@@ -566,133 +546,19 @@ export function IPsTable({ activeBackendId, timeRange }: IPsTableProps) {
 
                 {/* Expanded Details: Proxy Traffic + Domains List */}
                 {isExpanded && (
-                  <div className="px-4 sm:px-5 pb-4 bg-secondary/5">
-                    <div className="pt-3 grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      {/* Proxy Traffic Breakdown */}
-                      <div className="px-1">
-                        <p className="text-xs font-medium text-muted-foreground mb-2.5 flex items-center gap-1.5">
-                          <Waypoints className="h-3 w-3" />
-                          {t("proxyTraffic")}
-                        </p>
-                        {proxyStatsLoading === ip.ip ? (
-                          <div className="flex items-center justify-center py-4">
-                            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                          </div>
-                        ) : proxyStats[ip.ip] &&
-                          proxyStats[ip.ip].length > 0 ? (
-                          <div className="space-y-2">
-                            {proxyStats[ip.ip].map((ps) => {
-                              const totalTraffic =
-                                ip.totalDownload + ip.totalUpload;
-                              const proxyTraffic =
-                                ps.totalDownload + ps.totalUpload;
-                              const percent =
-                                totalTraffic > 0
-                                  ? (proxyTraffic / totalTraffic) * 100
-                                  : 0;
-                              const proxyTotal =
-                                ps.totalDownload + ps.totalUpload;
-                              const downloadPercent =
-                                proxyTotal > 0
-                                  ? (ps.totalDownload / proxyTotal) * 100
-                                  : 0;
-                              const uploadPercent =
-                                proxyTotal > 0
-                                  ? (ps.totalUpload / proxyTotal) * 100
-                                  : 0;
-                              return (
-                                <div
-                                  key={ps.chain}
-                                  className="px-3 py-2 rounded-lg bg-card border border-border/50">
-                                  <div className="flex items-center justify-between mb-1.5">
-                                    <span
-                                      className="inline-flex items-center gap-1.5 text-xs font-medium truncate max-w-[60%]"
-                                      title={ps.chain}>
-                                      <Waypoints className="h-3 w-3 text-orange-500 shrink-0" />
-                                      {ps.chain}
-                                    </span>
-                                    <span className="text-[11px] text-muted-foreground tabular-nums shrink-0">
-                                      {percent.toFixed(1)}%
-                                    </span>
-                                  </div>
-                                  <div className="w-full h-1.5 rounded-full bg-secondary/80 mb-1.5 overflow-hidden flex">
-                                    <div
-                                      className="h-full bg-blue-500 transition-all"
-                                      style={{
-                                        width: `${Math.max(percent * (downloadPercent / 100), 0.5)}%`,
-                                      }}
-                                    />
-                                    <div
-                                      className="h-full bg-purple-500 transition-all"
-                                      style={{
-                                        width: `${Math.max(percent * (uploadPercent / 100), 0.5)}%`,
-                                      }}
-                                    />
-                                  </div>
-                                  <div className="flex flex-wrap items-center gap-2 sm:gap-3 text-[11px] tabular-nums">
-                                    <span className="text-blue-500">
-                                      ↓ {formatBytes(ps.totalDownload)}
-                                    </span>
-                                    <span className="text-purple-500">
-                                      ↑ {formatBytes(ps.totalUpload)}
-                                    </span>
-                                    <span className="text-muted-foreground">
-                                      {formatNumber(ps.totalConnections)}{" "}
-                                      {t("conn")}
-                                    </span>
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        ) : ip.chains && ip.chains.length > 0 ? (
-                          <div className="flex flex-wrap gap-1.5">
-                            {ip.chains.map((chain) => (
-                              <span
-                                key={chain}
-                                className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-secondary/60 text-foreground dark:bg-secondary/40 dark:text-foreground/80 text-xs font-medium max-w-full min-w-0"
-                                title={chain}>
-                                <Waypoints className="h-3 w-3 shrink-0" />
-                                <span className="truncate min-w-0">
-                                  {chain}
-                                </span>
-                              </span>
-                            ))}
-                          </div>
-                        ) : (
-                          <span className="text-xs text-muted-foreground">
-                            -
-                          </span>
-                        )}
-                      </div>
-
-                      {/* Associated Domains */}
-                      <div className="px-1">
-                        <p className="text-xs font-medium text-muted-foreground mb-2.5 flex items-center gap-1.5">
-                          <Link2 className="h-3 w-3" />
-                          {t("associatedDomains")}
-                        </p>
-                        <div className="flex flex-wrap gap-2">
-                          {ip.domains.map((domain) => {
-                            const domainColor = getDomainColor(domain);
-                            return (
-                              <div
-                                key={domain}
-                                className="flex items-center gap-2 px-2.5 py-1.5 sm:px-3 sm:py-2 rounded-lg bg-card border border-border/50 hover:border-primary/30 hover:shadow-sm transition-all">
-                                <div
-                                  className={`w-5 h-5 sm:w-6 sm:h-6 rounded-md ${domainColor.bg} ${domainColor.text} flex items-center justify-center shrink-0`}>
-                                  <Globe className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
-                                </div>
-                                <span className="text-xs font-medium truncate max-w-[180px] sm:max-w-[200px]">
-                                  {domain}
-                                </span>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
+                  <IPExpandedDetails
+                    ip={ip}
+                    proxyStats={proxyStats[ip.ip]}
+                    proxyStatsLoading={proxyStatsLoading === ip.ip}
+                    domainDetails={domainDetails[ip.ip]}
+                    domainDetailsLoading={domainDetailsLoading === ip.ip}
+                    associatedDomainsIcon="link"
+                    labels={{
+                      proxyTraffic: t("proxyTraffic"),
+                      associatedDomains: t("associatedDomains"),
+                      conn: t("conn"),
+                    }}
+                  />
                 )}
               </div>
             );

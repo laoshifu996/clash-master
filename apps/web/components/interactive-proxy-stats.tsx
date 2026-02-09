@@ -24,10 +24,15 @@ interface InteractiveProxyStatsProps {
 }
 
 function normalizeProxyName(name: string): string {
-  return name
+  const normalized = name
     .trim()
     .replace(/^\["?/, "")
     .replace(/"?\]$/, "");
+  const parts = normalized
+    .split(">")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parts[0] || normalized;
 }
 
 function simplifyProxyName(name: string): string {
@@ -345,10 +350,28 @@ export function InteractiveProxyStats({
             <TabsTrigger value="ips">IP Addresses</TabsTrigger>
           </TabsList>
           <TabsContent value="domains" className="mt-4">
-            <DomainStatsTable domains={proxyDomains} loading={loading} />
+            <DomainStatsTable
+              domains={proxyDomains}
+              loading={loading}
+              activeBackendId={activeBackendId}
+              timeRange={timeRange}
+              sourceChain={selectedProxy}
+              richExpand
+              showProxyColumn={false}
+              showProxyTrafficInExpand={false}
+            />
           </TabsContent>
           <TabsContent value="ips" className="mt-4">
-            <IPStatsTable ips={proxyIPs} loading={loading} />
+            <IPStatsTable
+              ips={proxyIPs}
+              loading={loading}
+              activeBackendId={activeBackendId}
+              timeRange={timeRange}
+              sourceChain={selectedProxy}
+              richExpand
+              showProxyColumn={false}
+              showProxyTrafficInExpand={false}
+            />
           </TabsContent>
         </Tabs>
       )}
